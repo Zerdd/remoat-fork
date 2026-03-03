@@ -15,7 +15,7 @@ import { htmlToTelegramHtml } from '../utils/htmlToTelegramMarkdown';
 // ---------------------------------------------------------------------------
 
 export interface AssistantDomSegment {
-    kind: 'assistant-body' | 'thinking' | 'tool-call' | 'tool-result' | 'feedback';
+    kind: 'assistant-body' | 'thinking' | 'thinking-content' | 'tool-call' | 'tool-result' | 'feedback';
     text: string;
     role: 'assistant';
     messageIndex: number;
@@ -31,6 +31,7 @@ export interface AssistantDomSegmentPayload {
 export interface ClassifyResult {
     finalOutputText: string;
     activityLines: string[];
+    thinkingLines: string[];
     feedback: string[];
     diagnostics: {
         source: 'dom-structured' | 'legacy-fallback';
@@ -54,6 +55,7 @@ export function classifyAssistantSegments(payload: unknown): ClassifyResult {
         return {
             finalOutputText: '',
             activityLines: [],
+            thinkingLines: [],
             feedback: [],
             diagnostics: {
                 source: 'legacy-fallback',
@@ -68,6 +70,7 @@ export function classifyAssistantSegments(payload: unknown): ClassifyResult {
 
     const bodyTexts: string[] = [];
     const activityLines: string[] = [];
+    const thinkingLines: string[] = [];
     const feedbackTexts: string[] = [];
     const segmentCounts: Record<string, number> = {};
 
@@ -81,6 +84,11 @@ export function classifyAssistantSegments(payload: unknown): ClassifyResult {
                 }
                 break;
             case 'thinking':
+            case 'thinking-content':
+                if (seg.text && seg.text.trim()) {
+                    thinkingLines.push(seg.text.trim());
+                }
+                break;
             case 'tool-call':
             case 'tool-result':
                 if (seg.text && seg.text.trim()) {
@@ -102,6 +110,7 @@ export function classifyAssistantSegments(payload: unknown): ClassifyResult {
     return {
         finalOutputText,
         activityLines,
+        thinkingLines,
         feedback: feedbackTexts,
         diagnostics: {
             source: 'dom-structured',
@@ -150,9 +159,11 @@ export function extractAssistantSegmentsPayloadScript(): string {
     var looksLikeActivityLog = function(text) {
         var normalized = (text || '').trim().toLowerCase();
         if (!normalized) return false;
-        if (/^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i.test(normalized) && normalized.length <= 220) return true;
-        if (/^initiating\\s/i.test(normalized) && normalized.length <= 500) return true;
-        if (/^thought for\\s/i.test(normalized) && normalized.length <= 500) return true;
+        // Strip leading emoji/non-letter chars for matching
+        var stripped = normalized.replace(/^[^a-z]+/i, '');
+        if (/^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i.test(stripped) && normalized.length <= 220) return true;
+        if (/^initiating\\s/i.test(stripped) && normalized.length <= 500) return true;
+        if (/^thought for\\s/i.test(stripped) && normalized.length <= 500) return true;
         return false;
     };
 
@@ -167,6 +178,12 @@ export function extractAssistantSegmentsPayloadScript(): string {
         if (/^full output written to\\b/i.test(first)) return true;
         if (/^output\\.[a-z0-9._-]+(?:#l\\d+(?:-\\d+)?)?$/i.test(first)) return true;
         return false;
+    };
+
+    var looksLikeThinking = function(text) {
+        var stripped = (text || '').trim().replace(/^[^a-zA-Z]+/, '').toLowerCase();
+        if (!stripped) return false;
+        return /^(?:thought for|thinking)\\b/i.test(stripped);
     };
 
     var isInsideExcludedContainer = function(node) {
@@ -269,11 +286,15 @@ export function extractAssistantSegmentsPayloadScript(): string {
     for (var di = 0; di < details.length; di++) {
         var detail = details[di];
         var summary = detail.querySelector('summary');
+        var isThinkingBlock = false;
         if (summary) {
             var summaryText = (summary.textContent || '').trim();
+            // Strip leading emoji/non-letter chars for matching
+            var summaryStripped = summaryText.replace(/^[^a-zA-Z]+/, '');
+            isThinkingBlock = /^(?:thought for|thinking)\\b/i.test(summaryStripped);
             if (summaryText) {
                 segments.push({
-                    kind: 'thinking',
+                    kind: isThinkingBlock ? 'thinking' : 'tool-call',
                     text: summaryText,
                     role: 'assistant',
                     messageIndex: 0,
@@ -281,21 +302,41 @@ export function extractAssistantSegmentsPayloadScript(): string {
                 });
             }
         }
-        // Extract child content (tool-call / tool-result) inside <details>
+        // Force-open collapsed details to access hidden content
+        var wasOpen = detail.open;
+        if (!wasOpen) {
+            detail.open = true;
+        }
+        // Extract child content inside <details>
         var children = detail.children;
         for (var ci = 0; ci < children.length; ci++) {
             var child = children[ci];
             if (child.tagName === 'SUMMARY' || child.tagName === 'STYLE') continue;
             var childText = (child.innerText || child.textContent || '').trim();
             if (!childText || childText.length < 2) continue;
-            var childKind = looksLikeToolOutput(childText) ? 'tool-result' : 'tool-call';
-            segments.push({
-                kind: childKind,
-                text: childText.slice(0, 300),
-                role: 'assistant',
-                messageIndex: 0,
-                domPath: 'details:nth(' + di + ') child:nth(' + ci + ')'
-            });
+            if (isThinkingBlock) {
+                // Thinking body content — preserve more text for display
+                segments.push({
+                    kind: 'thinking-content',
+                    text: childText.slice(0, 2000),
+                    role: 'assistant',
+                    messageIndex: 0,
+                    domPath: 'details:nth(' + di + ') child:nth(' + ci + ')'
+                });
+            } else {
+                var childKind = looksLikeToolOutput(childText) ? 'tool-result' : 'tool-call';
+                segments.push({
+                    kind: childKind,
+                    text: childText.slice(0, 300),
+                    role: 'assistant',
+                    messageIndex: 0,
+                    domPath: 'details:nth(' + di + ') child:nth(' + ci + ')'
+                });
+            }
+        }
+        // Restore original collapsed state
+        if (!wasOpen) {
+            detail.open = false;
         }
     }
 
@@ -315,7 +356,11 @@ export function extractAssistantSegmentsPayloadScript(): string {
         if (el.closest('.leading-relaxed, .rendered-markdown, .prose, .animate-markdown, [data-message-role], [data-message-author-role]')) continue;
         var aText = (el.innerText || el.textContent || '').replace(/\\r/g, '').trim();
         if (!aText || aText.length < 4 || aText.length > 300) continue;
-        if (looksLikeActivityLog(aText) || looksLikeToolOutput(aText)) {
+        // Skip model selector / dropdown UI text (contains multiple model names)
+        var aLower = aText.toLowerCase();
+        if ((aLower.includes('gemini') || aLower.includes('claude') || aLower.includes('gpt')) && aLower.includes('send')) continue;
+        var isThinking = looksLikeThinking(aText);
+        if (isThinking || looksLikeActivityLog(aText) || looksLikeToolOutput(aText)) {
             // Ancestor dedup: skip if a parent was already captured as activity
             var dup = false;
             var p = el.parentElement;
@@ -325,10 +370,10 @@ export function extractAssistantSegmentsPayloadScript(): string {
             }
             if (dup) continue;
             actSeen.add(el);
-            var aKind = looksLikeToolOutput(aText) ? 'tool-result' : 'tool-call';
+            var aKind = isThinking ? 'thinking' : (looksLikeToolOutput(aText) ? 'tool-result' : 'tool-call');
             segments.push({
                 kind: aKind,
-                text: aText.slice(0, 300),
+                text: aText.slice(0, isThinking ? 2000 : 300),
                 role: 'assistant',
                 messageIndex: 0,
                 domPath: 'activity-scan:nth(' + ai + ')'

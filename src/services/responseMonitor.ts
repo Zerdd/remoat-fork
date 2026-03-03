@@ -31,10 +31,11 @@ export const RESPONSE_SELECTORS = {
         const looksLikeActivityLog = (text) => {
             const normalized = (text || '').trim().toLowerCase();
             if (!normalized) return false;
+            const stripped = normalized.replace(/^[^a-z]+/i, '');
             const activityPattern = /^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i;
-            if (activityPattern.test(normalized) && normalized.length <= 220) return true;
-            if (/^initiating\\s/i.test(normalized) && normalized.length <= 500) return true;
-            if (/^thought for\\s/i.test(normalized) && normalized.length <= 500) return true;
+            if (activityPattern.test(stripped) && normalized.length <= 220) return true;
+            if (/^initiating\\s/i.test(stripped) && normalized.length <= 500) return true;
+            if (/^thought for\\s/i.test(stripped) && normalized.length <= 500) return true;
             return false;
         };
 
@@ -210,10 +211,11 @@ export const RESPONSE_SELECTORS = {
         const looksLikeActivityLog = (text) => {
             const normalized = (text || '').trim().toLowerCase();
             if (!normalized) return false;
+            const stripped = normalized.replace(/^[^a-z]+/i, '');
             const activityPattern = /^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i;
-            if (activityPattern.test(normalized) && normalized.length <= 220) return true;
-            if (/^initiating\\s/i.test(normalized) && normalized.length <= 500) return true;
-            if (/^thought for\\s/i.test(normalized) && normalized.length <= 500) return true;
+            if (activityPattern.test(stripped) && normalized.length <= 220) return true;
+            if (/^initiating\\s/i.test(stripped) && normalized.length <= 500) return true;
+            if (/^thought for\\s/i.test(stripped) && normalized.length <= 500) return true;
             return false;
         };
         const looksLikeFeedbackFooter = (text) => {
@@ -296,10 +298,11 @@ export const RESPONSE_SELECTORS = {
         const looksLikeActivityLog = (text) => {
             const normalized = (text || '').trim().toLowerCase();
             if (!normalized) return false;
+            const stripped = normalized.replace(/^[^a-z]+/i, '');
             const activityPattern = /^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i;
-            if (activityPattern.test(normalized) && normalized.length <= 220) return true;
-            if (/^initiating\\s/i.test(normalized) && normalized.length <= 500) return true;
-            if (/^thought for\\s/i.test(normalized) && normalized.length <= 500) return true;
+            if (activityPattern.test(stripped) && normalized.length <= 220) return true;
+            if (/^initiating\\s/i.test(stripped) && normalized.length <= 500) return true;
+            if (/^thought for\\s/i.test(stripped) && normalized.length <= 500) return true;
             return false;
         };
 
@@ -425,10 +428,11 @@ export const RESPONSE_SELECTORS = {
         const looksLikeActivityLog = (text) => {
             const normalized = (text || '').trim().toLowerCase();
             if (!normalized) return false;
+            const stripped = normalized.replace(/^[^a-z]+/i, '');
             const activityPattern = /^(?:analy[sz]ing|reading|writing|running|searching|planning|thinking|processing|loading|executing|testing|debugging|fetching|connecting|creating|updating|deleting|installing|building|compiling|deploying|checking|scanning|parsing|resolving|downloading|uploading|analyzed|read|wrote|ran|created|updated|deleted|fetched|built|compiled|installed|resolved|downloaded|connected)\\b/i;
-            if (activityPattern.test(normalized) && normalized.length <= 220) return true;
-            if (/^initiating\\s/i.test(normalized) && normalized.length <= 500) return true;
-            if (/^thought for\\s/i.test(normalized) && normalized.length <= 500) return true;
+            if (activityPattern.test(stripped) && normalized.length <= 220) return true;
+            if (/^initiating\\s/i.test(stripped) && normalized.length <= 500) return true;
+            if (/^thought for\\s/i.test(stripped) && normalized.length <= 500) return true;
             return false;
         };
         const looksLikeFeedbackFooter = (text) => {
@@ -629,6 +633,8 @@ export interface ResponseMonitorOptions {
     onPhaseChange?: (phase: ResponsePhase, text: string | null) => void;
     /** Process log update callback (activity messages + tool output) */
     onProcessLog?: (text: string) => void;
+    /** Thinking content callback (AI thinking/reasoning text) */
+    onThinkingLog?: (text: string) => void;
 }
 
 /**
@@ -650,6 +656,7 @@ export class ResponseMonitor {
     private readonly onTimeout?: (lastText: string) => void;
     private readonly onPhaseChange?: (phase: ResponsePhase, text: string | null) => void;
     private readonly onProcessLog?: (text: string) => void;
+    private readonly onThinkingLog?: (text: string) => void;
 
     private pollTimer: ReturnType<typeof setTimeout> | null = null;
     private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -661,6 +668,7 @@ export class ResponseMonitor {
     private stopGoneCount: number = 0;
     private quotaDetected: boolean = false;
     private seenProcessLogKeys: Set<string> = new Set();
+    private seenThinkingLogKeys: Set<string> = new Set();
     private structuredDiagLogged: boolean = false;
     private lastExtractionSource: 'structured' | 'legacy' | null = null;
 
@@ -676,6 +684,7 @@ export class ResponseMonitor {
         this.onTimeout = options.onTimeout;
         this.onPhaseChange = options.onPhaseChange;
         this.onProcessLog = options.onProcessLog;
+        this.onThinkingLog = options.onThinkingLog;
     }
 
     /** Start monitoring */
@@ -704,6 +713,7 @@ export class ResponseMonitor {
         this.stopGoneCount = 0;
         this.quotaDetected = false;
         this.seenProcessLogKeys = new Set();
+        this.seenThinkingLogKeys = new Set();
 
         this.onPhaseChange?.(this.currentPhase, null);
 
@@ -742,6 +752,10 @@ export class ResponseMonitor {
                     for (const line of baselineClassified.activityLines) {
                         const key = (line || '').replace(/\r/g, '').trim().slice(0, 200);
                         if (key) this.seenProcessLogKeys.add(key);
+                    }
+                    for (const line of baselineClassified.thinkingLines) {
+                        const key = (line || '').replace(/\r/g, '').trim().slice(0, 200);
+                        if (key) this.seenThinkingLogKeys.add(key);
                     }
                 }
             } catch {
@@ -903,6 +917,31 @@ export class ResponseMonitor {
     }
 
     /**
+     * Emit new thinking log entries, deduplicating against previously seen keys.
+     */
+    private emitNewThinkingLogs(entries: string[]): void {
+        const newEntries: string[] = [];
+        for (const line of entries) {
+            const normalized = (line || '').replace(/\r/g, '').trim();
+            if (!normalized) continue;
+            const key = normalized.slice(0, 200);
+            if (this.seenThinkingLogKeys.has(key)) continue;
+            this.seenThinkingLogKeys.add(key);
+            // Also mark as seen in process logs to prevent cross-contamination
+            this.seenProcessLogKeys.add(key);
+            newEntries.push(normalized.slice(0, 2000));
+        }
+        if (newEntries.length > 0) {
+            logger.debug('[ResponseMonitor] Emitting', newEntries.length, 'new thinking entries');
+            try {
+                this.onThinkingLog?.(newEntries.join('\n\n'));
+            } catch {
+                // callback error
+            }
+        }
+    }
+
+    /**
      * Single poll cycle.
      * - Legacy mode: 4 CDP calls (stop, quota, text, process logs).
      * - Structured mode: 3-4 CDP calls (stop, quota, structured; legacy text on fallback).
@@ -945,6 +984,11 @@ export class ResponseMonitor {
 
                             if (classified.activityLines.length > 0) {
                                 this.emitNewProcessLogs(classified.activityLines);
+                            }
+                            if (classified.thinkingLines.length > 0) {
+                                logger.debug('[ResponseMonitor] Thinking lines found:', classified.thinkingLines.length,
+                                    'previews:', classified.thinkingLines.map(l => l.slice(0, 80)));
+                                this.emitNewThinkingLogs(classified.thinkingLines);
                             }
                         } else if (!this.structuredDiagLogged) {
                             this.structuredDiagLogged = true;

@@ -11,6 +11,7 @@ import { ErrorPopupDetector, ErrorPopupInfo } from './errorPopupDetector';
 import { PlanningDetector, PlanningInfo } from './planningDetector';
 import { QuotaService } from './quotaService';
 import { UserMessageDetector, UserMessageInfo } from './userMessageDetector';
+import { buildPlanNotificationUI } from '../ui/planUi';
 
 /** Represents a Telegram chat target: either a chat_id or chat_id + message_thread_id */
 export interface TelegramChannel {
@@ -333,16 +334,8 @@ export function ensurePlanningDetector(
             if (!targetChannel || !bridge.botApi) return;
 
             const targetChannelStr = targetChannel.threadId ? String(targetChannel.threadId) : String(targetChannel.chatId);
-            const descriptionText = info.description || info.planSummary || t('A plan has been generated and is awaiting your review.');
 
-            let text = `📋 <b>Planning Mode</b>\n\n`;
-            text += escapeHtml(descriptionText) + `\n\n`;
-            text += `<b>Plan:</b> ${escapeHtml(info.planTitle || 'Implementation Plan')}\n`;
-            text += `<b>Workspace:</b> ${escapeHtml(projectName)}`;
-
-            const keyboard = new InlineKeyboard()
-                .text('📖 Open', buildPlanningCustomId('open', projectName, targetChannelStr))
-                .text('▶ Proceed', buildPlanningCustomId('proceed', projectName, targetChannelStr));
+            const { text, keyboard } = buildPlanNotificationUI(info, projectName, targetChannelStr);
 
             const msgId = await sendTelegramMessage(bridge.botApi, targetChannel, text, keyboard);
             if (msgId) {

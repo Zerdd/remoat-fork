@@ -302,10 +302,14 @@ npm test              # run the test suite
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide — code style, commit conventions, PR process, and project architecture.
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=optimistengineer/remoat&type=date&legend=top-left)](https://www.star-history.com/#optimistengineer/remoat&type=date&legend=top-left)
+
 ## License
 
 [MIT](LICENSE)
 
 ## Acknowledgements
 
-Inspired by [LazyGravity](https://github.com/tokyoweb3/LazyGravity).
+Based on [LazyGravity](https://github.com/tokyoweb3/LazyGravity), a Discord bot for remotely controlling Antigravity via CDP. Remoat ports the core architecture to Telegram and adds features like Forum Topics, voice input, and structured DOM extraction.

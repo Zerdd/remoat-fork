@@ -59,6 +59,10 @@ import { sendAutoAcceptUI, AUTOACCEPT_BTN_ON, AUTOACCEPT_BTN_OFF, AUTOACCEPT_BTN
 import { handleScreenshot } from '../ui/screenshotUi';
 import { buildProjectListUI, PROJECT_SELECT_ID, PROJECT_PAGE_PREFIX, parseProjectPageId } from '../ui/projectListUi';
 import { buildSessionPickerUI, SESSION_SELECT_ID, isSessionSelectId } from '../ui/sessionPickerUi';
+import {
+    PLAN_VIEW_BTN, PLAN_PROCEED_BTN, PLAN_EDIT_BTN, PLAN_REFRESH_BTN, PLAN_PAGE_PREFIX,
+    buildPlanNotificationUI, buildPlanContentUI, paginatePlanContent,
+} from '../ui/planUi';
 
 const PHASE_ICONS = {
     sending: '📡',
@@ -107,6 +111,11 @@ function stripHtmlForFile(html: string): string {
 }
 
 const userStopRequestedChannels = new Set<string>();
+
+/** Channels where the user is expected to type plan edit instructions */
+const planEditPendingChannels = new Map<string, { projectName: string }>();
+/** Cached plan content pages per channel */
+const planContentCache = new Map<string, string[]>();
 
 function channelKey(ch: TelegramChannel): string {
     return ch.threadId ? `${ch.chatId}:${ch.threadId}` : String(ch.chatId);
@@ -239,8 +248,11 @@ async function sendPromptToAntigravity(
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let lastProgressText = '';
     let lastActivityLogText = '';
+    let lastThinkingLogText = '';
     const LIVE_RESPONSE_MAX_LEN = 3800;
     const LIVE_ACTIVITY_MAX_LEN = 3800;
+    const THINKING_BUDGET = 1500;
+    const ACTIVITY_BUDGET = 2300;
     const processLogBuffer = new ProcessLogBuffer({ maxChars: LIVE_ACTIVITY_MAX_LEN, maxEntries: 120, maxEntryLength: 220 });
     let liveResponseMsgId: number | null = null;
     let liveActivityMsgId: number | null = null;
@@ -264,9 +276,23 @@ async function sendPromptToAntigravity(
 
     const buildLiveActivityText = (title: string, rawText: string, footer: string): string => {
         const normalized = (rawText || '').trim();
-        const body = normalized
-            ? fitForSingleEmbedDescription(formatForTelegram(normalized), LIVE_ACTIVITY_MAX_LEN)
-            : ACTIVITY_PLACEHOLDER;
+        const thinkingNormalized = (lastThinkingLogText || '').trim();
+        const hasThinking = thinkingNormalized.length > 10;
+
+        let body: string;
+        if (hasThinking) {
+            const thinkingTruncated = thinkingNormalized.length > THINKING_BUDGET
+                ? '...' + thinkingNormalized.slice(-THINKING_BUDGET + 3)
+                : thinkingNormalized;
+            const activityBody = normalized
+                ? fitForSingleEmbedDescription(formatForTelegram(normalized), ACTIVITY_BUDGET)
+                : ACTIVITY_PLACEHOLDER;
+            body = `\u{1F9E0} <b>AI Thinking</b>\n<blockquote>${escapeHtml(thinkingTruncated)}</blockquote>\n\n\u{1F4CB} <b>Activity</b>\n${activityBody}`;
+        } else {
+            body = normalized
+                ? fitForSingleEmbedDescription(formatForTelegram(normalized), LIVE_ACTIVITY_MAX_LEN)
+                : ACTIVITY_PLACEHOLDER;
+        }
         return `<b>${escapeHtml(title)}</b>\n\n${body}\n\n<i>${escapeHtml(footer)}</i>`;
     };
 
@@ -388,6 +414,20 @@ async function sendPromptToAntigravity(
                 const v = liveActivityUpdateVersion;
                 upsertLiveActivity(`${PHASE_ICONS.thinking} Process Log`, lastActivityLogText || ACTIVITY_PLACEHOLDER, t(`⏱️ Elapsed: ${elapsed}s | Process log`), { expectedVersion: v, skipWhenFinalized: true }).catch(() => { });
             },
+            onThinkingLog: (thinkingText) => {
+                if (isFinalized) return;
+                logger.debug('[Bot] onThinkingLog received:', (thinkingText || '').slice(0, 100));
+                if (thinkingText && thinkingText.trim().length > 0) {
+                    lastThinkingLogText = lastThinkingLogText
+                        ? lastThinkingLogText + '\n' + thinkingText.trim()
+                        : thinkingText.trim();
+                    logger.debug('[Bot] lastThinkingLogText now:', lastThinkingLogText.length, 'chars');
+                }
+                const elapsed = Math.round((Date.now() - startTime) / 1000);
+                liveActivityUpdateVersion += 1;
+                const v = liveActivityUpdateVersion;
+                upsertLiveActivity(`${PHASE_ICONS.thinking} Process Log`, lastActivityLogText || ACTIVITY_PLACEHOLDER, t(`⏱️ Elapsed: ${elapsed}s | Process log`), { expectedVersion: v, skipWhenFinalized: true }).catch(() => { });
+            },
             onProgress: (text) => {
                 if (isFinalized) return;
                 const isStructured = monitor?.getLastExtractionSource() === 'structured';
@@ -395,6 +435,7 @@ async function sendPromptToAntigravity(
                 if (separated.output && separated.output.trim().length > 0) lastProgressText = separated.output;
             },
             onComplete: async (finalText, meta) => {
+                if (isFinalized) return; // Guard: prevent duplicate completion
                 isFinalized = true;
                 if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
                 const wasStoppedByUser = userStopRequestedChannels.delete(channelKey(channel));
@@ -1111,7 +1152,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             return;
         }
 
-        // Planning buttons
+        // Planning buttons (legacy parsing for backward compat)
         const planningAction = parsePlanningCustomId(data);
         if (planningAction) {
             const projectName = planningAction.projectName ?? bridge.lastActiveWorkspace;
@@ -1129,8 +1170,12 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                         await new Promise(r => setTimeout(r, 500));
                     }
                     if (planContent) {
-                        const truncated = planContent.length > 3800 ? planContent.substring(0, 3800) + '\n\n(truncated)' : planContent;
-                        await bot.api.sendMessage(ch.chatId, `<b>Plan Content</b>\n\n${escapeHtml(truncated)}`, { parse_mode: 'HTML', message_thread_id: ch.threadId });
+                        const chKey = channelKey(ch);
+                        const pages = paginatePlanContent(planContent);
+                        planContentCache.set(chKey, pages);
+                        const targetChannelStr = ch.threadId ? String(ch.threadId) : String(ch.chatId);
+                        const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName || '', targetChannelStr);
+                        await bot.api.sendMessage(ch.chatId, pageText, { parse_mode: 'HTML', message_thread_id: ch.threadId, reply_markup: pageKeyboard });
                     }
                 }
                 await ctx.answerCallbackQuery({ text: clicked ? 'Opened' : 'Open button not found.' });
@@ -1139,6 +1184,91 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
                 await ctx.answerCallbackQuery({ text: clicked ? 'Proceeding...' : 'Proceed button not found.' });
             }
+            return;
+        }
+
+        // New plan UI buttons (View/Proceed/Edit/Refresh)
+        if (data.startsWith(PLAN_VIEW_BTN + ':')) {
+            const suffix = data.substring(PLAN_VIEW_BTN.length + 1);
+            const [projectName] = suffix.split(':');
+            const detector = projectName ? bridge.pool.getPlanningDetector(projectName) : undefined;
+            if (!detector) { await ctx.answerCallbackQuery({ text: 'Planning detector not found.' }); return; }
+
+            const clicked = await detector.clickOpenButton();
+            if (clicked) {
+                await new Promise(r => setTimeout(r, 500));
+                let planContent: string | null = null;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    planContent = await detector.extractPlanContent();
+                    if (planContent) break;
+                    await new Promise(r => setTimeout(r, 500));
+                }
+                if (planContent) {
+                    const chKey = channelKey(ch);
+                    const pages = paginatePlanContent(planContent);
+                    planContentCache.set(chKey, pages);
+                    const targetChannelStr = ch.threadId ? String(ch.threadId) : String(ch.chatId);
+                    const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName, targetChannelStr);
+                    await bot.api.sendMessage(ch.chatId, pageText, { parse_mode: 'HTML', message_thread_id: ch.threadId, reply_markup: pageKeyboard });
+                }
+            }
+            await ctx.answerCallbackQuery({ text: clicked ? 'Opened' : 'Open button not found.' });
+            return;
+        }
+
+        if (data.startsWith(PLAN_PROCEED_BTN + ':')) {
+            const suffix = data.substring(PLAN_PROCEED_BTN.length + 1);
+            const [projectName] = suffix.split(':');
+            const detector = projectName ? bridge.pool.getPlanningDetector(projectName) : undefined;
+            if (!detector) { await ctx.answerCallbackQuery({ text: 'Planning detector not found.' }); return; }
+
+            const clicked = await detector.clickProceedButton();
+            if (clicked) {
+                planEditPendingChannels.delete(channelKey(ch));
+                try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+            }
+            await ctx.answerCallbackQuery({ text: clicked ? 'Proceeding...' : 'Proceed button not found.' });
+            return;
+        }
+
+        if (data.startsWith(PLAN_EDIT_BTN + ':')) {
+            const suffix = data.substring(PLAN_EDIT_BTN.length + 1);
+            const [projectName] = suffix.split(':');
+            planEditPendingChannels.set(channelKey(ch), { projectName });
+            await ctx.answerCallbackQuery({ text: 'Type your edit instructions (or /cancel).' });
+            await bot.api.sendMessage(ch.chatId, '<b>Edit Plan</b>\n\nType your plan edit instructions below.\nSend <code>/cancel</code> to cancel.', { parse_mode: 'HTML', message_thread_id: ch.threadId });
+            return;
+        }
+
+        if (data.startsWith(PLAN_REFRESH_BTN + ':')) {
+            const suffix = data.substring(PLAN_REFRESH_BTN.length + 1);
+            const [projectName, targetChannelStr] = suffix.split(':');
+            const detector = projectName ? bridge.pool.getPlanningDetector(projectName) : undefined;
+            if (!detector) { await ctx.answerCallbackQuery({ text: 'Planning detector not found.' }); return; }
+
+            const info = detector.getLastDetectedInfo();
+            if (info) {
+                const { text: uiText, keyboard: uiKeyboard } = buildPlanNotificationUI(info, projectName, targetChannelStr || String(ch.chatId));
+                try { await ctx.editMessageText(uiText, { parse_mode: 'HTML', reply_markup: uiKeyboard }); } catch { }
+            }
+            await ctx.answerCallbackQuery({ text: 'Refreshed' });
+            return;
+        }
+
+        // Plan pagination
+        if (data.startsWith(PLAN_PAGE_PREFIX + ':')) {
+            const rest = data.substring(PLAN_PAGE_PREFIX.length + 1);
+            const colonIdx = rest.indexOf(':');
+            const page = parseInt(rest.substring(0, colonIdx), 10);
+            const suffix = rest.substring(colonIdx + 1);
+            const [projectName, targetChannelStr] = suffix.split(':');
+            const chKey = channelKey(ch);
+            const pages = planContentCache.get(chKey);
+            if (!pages || isNaN(page)) { await ctx.answerCallbackQuery({ text: 'Page not found.' }); return; }
+
+            const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, page, projectName, targetChannelStr || String(ch.chatId));
+            try { await ctx.editMessageText(pageText, { parse_mode: 'HTML', reply_markup: pageKeyboard }); } catch { }
+            await ctx.answerCallbackQuery({ text: `Page ${page + 1}/${pages.length}` });
             return;
         }
 
@@ -1229,6 +1359,34 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         const text = ctx.message.text.trim();
 
         if (!text) return;
+
+        // Plan edit interception
+        const pendingPlanEdit = planEditPendingChannels.get(key);
+        if (pendingPlanEdit) {
+            if (text === '/cancel') {
+                planEditPendingChannels.delete(key);
+                await ctx.reply('Plan edit cancelled.');
+                return;
+            }
+
+            planEditPendingChannels.delete(key);
+            const editPrompt = `Please revise the plan based on the following feedback:\n\n${text}`;
+            const resolved = await resolveWorkspaceAndCdp(ch);
+            const cdp = resolved?.cdp ?? getCurrentCdp(bridge);
+            if (!cdp) {
+                await ctx.reply('Not connected to CDP.');
+                return;
+            }
+            await ctx.reply('Sending plan edit...');
+            await promptDispatcher.send({
+                channel: ch,
+                prompt: editPrompt,
+                cdp,
+                inboundImages: [],
+                options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+            });
+            return;
+        }
 
         // Check if it looks like a text command
         const parsed = parseMessageContent(text);

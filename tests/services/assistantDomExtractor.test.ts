@@ -66,9 +66,11 @@ describe('assistantDomExtractor', () => {
 
         expect(result.finalOutputText).toBe('最終回答: 1ドル=154.8円です。');
         expect(result.activityLines).toEqual([
-            'Analyzing current exchange data...',
             'jina-mcp-server / search_web',
             'Full output written to output.txt#L1-10',
+        ]);
+        expect(result.thinkingLines).toEqual([
+            'Analyzing current exchange data...',
         ]);
         expect(result.feedback).toEqual(['Good', 'Bad']);
         expect(result.diagnostics.source).toBe('dom-structured');
@@ -113,9 +115,53 @@ describe('assistantDomExtractor', () => {
 
         expect(result.finalOutputText).toBe('');
         expect(result.activityLines).toEqual([]);
+        expect(result.thinkingLines).toEqual([]);
         expect(result.feedback).toEqual([]);
         expect(result.diagnostics.source).toBe('legacy-fallback');
         expect(result.diagnostics.fallbackReason).toBe('invalid-payload');
+    });
+
+    it('routes thinking and thinking-content segments to thinkingLines', () => {
+        const payload = buildPayload([
+            {
+                kind: 'assistant-body',
+                text: 'Here is the answer.',
+                role: 'assistant',
+                messageIndex: 0,
+                domPath: 'multi-selector',
+            },
+            {
+                kind: 'thinking',
+                text: 'Thought for 12 seconds',
+                role: 'assistant',
+                messageIndex: 0,
+                domPath: 'details:nth(0) summary',
+            },
+            {
+                kind: 'thinking-content',
+                text: 'Let me analyze the user request carefully...',
+                role: 'assistant',
+                messageIndex: 0,
+                domPath: 'details:nth(0) child:nth(1)',
+            },
+            {
+                kind: 'tool-call',
+                text: 'mcp.search',
+                role: 'assistant',
+                messageIndex: 0,
+                domPath: 'details:nth(1) summary',
+            },
+        ]);
+
+        const result = classifyAssistantSegments(payload);
+
+        expect(result.finalOutputText).toBe('Here is the answer.');
+        expect(result.thinkingLines).toEqual([
+            'Thought for 12 seconds',
+            'Let me analyze the user request carefully...',
+        ]);
+        expect(result.activityLines).toEqual(['mcp.search']);
+        expect(result.diagnostics.segmentCounts['thinking-content']).toBe(1);
     });
 
     it('returns the extraction script as a DOM structure extraction function', () => {
