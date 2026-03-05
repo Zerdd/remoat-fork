@@ -45,7 +45,7 @@ Three-layer design: **CLI → Bot → Services/DB**
 ## Key Technical Details
 
 - **TypeScript strict mode**, target ES2022, CommonJS modules
-- **Path alias**: `@/` maps to `src/` (configured in jest.config.js `moduleNameMapper`, not in tsconfig paths — source imports use `@/` and it's resolved by ts-node at runtime)
+- **Path alias**: `@/` maps to `src/` in jest.config.js `moduleNameMapper` only (for tests). Source code uses relative imports (`./`, `../`)
 - **Data flow**: Telegram long-polling (no webhooks) → auth middleware → command routing → CDP injection into Antigravity → DOM polling for responses → chunked/streamed back to Telegram (max 4096 chars/message)
 - **Config**: `.env` file or `~/.config/remoat/config.json` (see `src/utils/configLoader.ts`). Key env vars:
   - `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` (required)
