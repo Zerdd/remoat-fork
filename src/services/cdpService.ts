@@ -837,23 +837,38 @@ export class CdpService extends EventEmitter {
     }
 
     /**
-     * Wait by polling until cascade-panel context becomes available.
-     * Right after Antigravity launch, contexts are created asynchronously even after Runtime.enable,
-     * so use this method to confirm readiness before DOM operations.
+     * Wait by polling until the chat panel is ready for DOM operations.
+     * Checks for cascade-panel context (legacy) or #conversation element (1.21.6+).
      *
      * @param timeoutMs Maximum wait time (ms). Default: 10000
      * @param pollIntervalMs Polling interval (ms). Default: 500
-     * @returns true if cascade-panel context was found
+     * @returns true if a usable chat context was found
      */
     async waitForCascadePanelReady(timeoutMs = 10000, pollIntervalMs = 500): Promise<boolean> {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
+            // Legacy: cascade-panel context
             const cascadeCtx = this.contexts.find(
                 c => c.url && c.url.includes(SELECTORS.CONTEXT_URL_KEYWORD),
             );
             if (cascadeCtx) {
                 return true;
             }
+
+            // Antigravity 1.21.6+: #conversation element exists in main context
+            // (no separate cascade-panel context is created)
+            try {
+                const res = await this.call('Runtime.evaluate', {
+                    expression: '!!document.getElementById("conversation")',
+                    returnByValue: true,
+                });
+                if (res?.result?.value === true) {
+                    return true;
+                }
+            } catch {
+                // Ignore — may not be connected yet
+            }
+
             await new Promise(r => setTimeout(r, pollIntervalMs));
         }
         return false;
@@ -1494,11 +1509,13 @@ export class CdpService extends EventEmitter {
             throw new Error('Not connected to CDP.');
         }
 
+        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
+        // Use tag-agnostic class-based selector to support both.
         const expression = `(async () => {
-            return Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .map(e => ({text: (e.textContent || '').trim().replace(/New$/, ''), class: e.className}))
-                .filter(e => e.class.includes('px-2 py-1 flex items-center justify-between') || e.text.includes('Gemini') || e.text.includes('GPT') || e.text.includes('Claude'))
-                .map(e => e.text);
+            return Array.from(document.querySelectorAll('button, div'))
+                .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'))
+                .map(e => (e.textContent || '').trim().replace(/New$/, '').trim())
+                .filter(t => t.length > 0 && t.length < 60);
         })()`;
 
         try {
@@ -1530,10 +1547,11 @@ export class CdpService extends EventEmitter {
         if (!this.isConnectedFlag || !this.ws) {
             return null;
         }
+        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
         const expression = `(() => {
-            return Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .find(e => e.className.includes('px-2 py-1 flex items-center justify-between') && e.className.includes('bg-gray-500/20'))
-                ?.textContent?.trim().replace(/New$/, '') || null;
+            var selected = Array.from(document.querySelectorAll('button, div'))
+                .find(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between') && e.className.includes('bg-gray-500/20') && !e.className.includes('hover:bg-gray-500/20'));
+            return selected ? (selected.textContent || '').trim().replace(/New$/, '').trim() : null;
         })()`;
         try {
             const contextId = this.getPrimaryContextId();
@@ -1558,54 +1576,53 @@ export class CdpService extends EventEmitter {
             throw new Error('Not connected to CDP. Call connect() first.');
         }
 
-        // DOM manipulation script: based on actual Antigravity UI DOM structure
-        // Model list uses div.cursor-pointer elements with class 'px-2 py-1 flex items-center justify-between'
-        // Currently selected has 'bg-gray-500/20', others have 'hover:bg-gray-500/10'
-        // textContent may have "New" suffix
+        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
+        // Tag-agnostic class-based selector supports both versions.
+        // textContent may have "New" suffix on newly added models.
         const safeModel = JSON.stringify(modelName);
         const expression = `(async () => {
             const targetModel = ${safeModel};
-            
-            // Get all items in the model list
-            const modelItems = Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .filter(e => e.className.includes('px-2 py-1 flex items-center justify-between'));
-            
+
+            // Get all items in the model list (button in 1.21.6+, div in older)
+            const modelItems = Array.from(document.querySelectorAll('button, div'))
+                .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'));
+
             if (modelItems.length === 0) {
                 return { ok: false, error: 'Model list not found. The dropdown may not be open.' };
             }
-            
+
             // Match target model by name (compare after removing New suffix)
             const targetItem = modelItems.find(el => {
                 const text = (el.textContent || '').trim().replace(/New$/, '').trim();
                 return text === targetModel || text.toLowerCase() === targetModel.toLowerCase();
             });
-            
+
             if (!targetItem) {
                 const available = modelItems.map(el => (el.textContent || '').trim().replace(/New$/, '').trim()).join(', ');
                 return { ok: false, error: 'Model "' + targetModel + '" not found. Available: ' + available };
             }
-            
+
             // Check if already selected
             if (targetItem.className.includes('bg-gray-500/20') && !targetItem.className.includes('hover:bg-gray-500/20')) {
                 return { ok: true, model: targetModel, alreadySelected: true };
             }
-            
+
             // Click to select model
             targetItem.click();
             await new Promise(r => setTimeout(r, 500));
-            
+
             // Verify selection was applied
-            const updatedItems = Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .filter(e => e.className.includes('px-2 py-1 flex items-center justify-between'));
+            const updatedItems = Array.from(document.querySelectorAll('button, div'))
+                .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'));
             const selectedItem = updatedItems.find(el => {
                 const text = (el.textContent || '').trim().replace(/New$/, '').trim();
                 return text === targetModel || text.toLowerCase() === targetModel.toLowerCase();
             });
-            
+
             if (selectedItem && selectedItem.className.includes('bg-gray-500/20') && !selectedItem.className.includes('hover:bg-gray-500/20')) {
                 return { ok: true, model: targetModel, verified: true };
             }
-            
+
             // Click succeeded but verification failed
             return { ok: true, model: targetModel, verified: false };
         })()`;

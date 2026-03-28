@@ -44,17 +44,13 @@ describe('CdpService - Target Detection & Connection', () => {
             ws.on('message', (message) => {
                 const req = JSON.parse(message.toString());
                 if (req.method === 'Runtime.enable') {
-                    // Send mock execution context created
+                    // Send mock execution context created.
+                    // NOTE: Antigravity v1.21.6+ removed the 'cascade-panel' sandboxed context.
+                    // The agent panel now lives directly in the main 'top' workbench context.
                     ws.send(JSON.stringify({
                         method: 'Runtime.executionContextCreated',
                         params: {
                             context: { id: 1, name: 'top', url: 'file:///some/path/workbench.html' }
-                        }
-                    }));
-                    ws.send(JSON.stringify({
-                        method: 'Runtime.executionContextCreated',
-                        params: {
-                            context: { id: 2, name: 'cascade-panel', url: 'file:///some/path/cascade-panel.html' }
                         }
                     }));
                     // Reply to the enable request
@@ -92,7 +88,9 @@ describe('CdpService - Target Detection & Connection', () => {
         expect(targetUrl).toBe(fakeWsUrl);
     });
 
-    it('establishes a WebSocket connection and recognizes the context (cascade-panel)', async () => {
+    it('establishes a WebSocket connection and uses the top-level workbench context (v1.21.6+)', async () => {
+        // Antigravity v1.21.6 removed the cascade-panel sandboxed context.
+        // The bot now operates in the main workbench 'top' context (id 1).
         await service.connect();
         expect(service.isConnected()).toBe(true);
 
@@ -103,7 +101,7 @@ describe('CdpService - Target Detection & Connection', () => {
         expect(contexts.length).toBeGreaterThanOrEqual(1);
 
         const targetContextId = service.getPrimaryContextId();
-        expect(targetContextId).toBe(2); // cascade-panel.html is id 2
+        expect(targetContextId).toBe(1); // top workbench context
     });
 
     it('triggers the auto-reconnect listener when disconnected', async () => {
