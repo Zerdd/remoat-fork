@@ -77,6 +77,51 @@ describe('htmlToTelegramHtml', () => {
         });
     });
 
+    // Regression tests for Antigravity v1.21.6 compatibility
+    // Antigravity renders markdown pipe tables as bare <pre>text</pre> blocks.
+    // Two bugs combined to produce an orphan </pre> tag that caused Telegram
+    // 400 "Unexpected end tag" errors.
+    describe('bare <pre> blocks (Antigravity v1.21.6 regression)', () => {
+        it('bare <pre> block produces matched opening and closing tags', () => {
+            // Bug: <pre><code> handler skipped bare <pre>; stripUnsupportedTags
+            // stripped the <pre> open but kept </pre>, causing a Telegram 400.
+            const html = '<pre>| Layer | What it does |\n|---|---|\n| Bot | UI |</pre>';
+            const result = htmlToTelegramHtml(html);
+            const opens = (result.match(/<pre>/gi) ?? []).length;
+            const closes = (result.match(/<\/pre>/gi) ?? []).length;
+            expect(opens).toBe(closes);
+            expect(opens).toBeGreaterThanOrEqual(1);
+            expect(result).toContain('| Layer |');
+        });
+
+        it('<p> regex does not consume adjacent <pre> tags', () => {
+            // Bug: <p[^>]*> matched <pre> (reads as <p + re + >) so the paragraph
+            // replacement ate the <pre> opening tag, leaving an orphan </pre>.
+            const html = '<p>Intro text.</p><pre>| A | B |\n| C | D |</pre><p>After text.</p>';
+            const result = htmlToTelegramHtml(html);
+            const opens = (result.match(/<pre>/gi) ?? []).length;
+            const closes = (result.match(/<\/pre>/gi) ?? []).length;
+            expect(opens).toBe(closes);
+            expect(result).toContain('Intro text.');
+            expect(result).toContain('| A | B |');
+            expect(result).toContain('After text.');
+        });
+
+        it('multiple bare <pre> blocks all have matched tags', () => {
+            // Simulates the real failing case: a table <pre> followed by a code-flow <pre>.
+            const html =
+                '<p>Here is a table:</p>' +
+                '<pre>| Layer | What it does |\n|---|---|\n| Bot | UI |</pre>' +
+                '<p>And the flow:</p>' +
+                '<pre>Telegram → router\n  └── text → agent</pre>';
+            const result = htmlToTelegramHtml(html);
+            const opens = (result.match(/<pre>/gi) ?? []).length;
+            const closes = (result.match(/<\/pre>/gi) ?? []).length;
+            expect(opens).toBe(closes);
+            expect(opens).toBe(2);
+        });
+    });
+
     describe('links', () => {
         it('preserves link tags with href', () => {
             const html = '<a href="https://example.com">click here</a>';
