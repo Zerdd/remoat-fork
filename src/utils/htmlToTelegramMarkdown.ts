@@ -22,12 +22,19 @@ export function htmlToTelegramHtml(html: string): string {
         `\n<b>${stripTags(content).trim()}</b>\n`,
     );
 
-    // Code blocks: <pre><code> (must come before inline code)
+    // Code blocks: <pre><code> (must come before inline code and bare <pre>)
     result = result.replace(
         /<pre[^>]*>\s*<code(?:\s+class="language-([^"]*)")?[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi,
         (_m, lang, content) => lang
             ? `\n<pre><code class="language-${lang}">${content}</code></pre>\n`
             : `\n<pre>${content}</pre>\n`,
+    );
+
+    // Bare <pre> blocks (no <code> child) — e.g. Antigravity renders pipe tables as <pre>
+    // Must come AFTER <pre><code> handling to avoid double-processing
+    result = result.replace(
+        /<pre[^>]*>([\s\S]*?)<\/pre>/gi,
+        (_m, content) => `\n<pre>${content}</pre>\n`,
     );
 
     // Inline code
@@ -180,9 +187,9 @@ export function htmlToTelegramHtml(html: string): string {
     result = result.replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, (_m, text) => `^${stripTags(text).trim()}`);
     result = result.replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, (_m, text) => `_${stripTags(text).trim()}`);
 
-    // Block-level elements
-    result = result.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
-    result = result.replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, '$1\n');
+    // Block-level elements — use \b after tag name to prevent <p> matching <pre>, etc.
+    result = result.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
+    result = result.replace(/<div\b[^>]*>([\s\S]*?)<\/div>/gi, '$1\n');
 
     // Lists (iterative for nested lists)
     for (let iteration = 0; iteration < 5; iteration++) {
