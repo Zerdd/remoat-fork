@@ -197,9 +197,10 @@ describe('CdpService - Message Injection (Step 5)', () => {
         //   pressEnterToSend: Enter (keyDown/keyUp) = 2 events
         const keyCalls = receivedMessages.filter(m => m.method === 'Input.dispatchKeyEvent');
         expect(keyCalls).toHaveLength(6);
-        // clearInputField: Meta+A select all
+        // clearInputField: Meta+A (macOS) or Ctrl+A (Linux/Windows) select all
+        const expectedModifier = process.platform === 'darwin' ? 4 : 2;
         expect(keyCalls[0].params.key).toBe('a');
-        expect(keyCalls[0].params.modifiers).toBe(4);
+        expect(keyCalls[0].params.modifiers).toBe(expectedModifier);
         expect(keyCalls[1].params.key).toBe('a');
         // clearInputField: Backspace delete
         expect(keyCalls[2].params.key).toBe('Backspace');
