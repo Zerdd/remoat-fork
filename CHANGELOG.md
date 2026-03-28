@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## [0.2.11] - 2026-03-28
 
 ### Fixed
-- Restore compatibility with Antigravity v1.21.6 DOM changes
+- Restore compatibility with Antigravity v1.21.6 DOM changes — thanks [@jacob-bd](https://github.com/jacob-bd) ([#6](https://github.com/optimistengineer/remoat/pull/6))
   - Model picker selectors updated for `<button>` elements (previously `<div>`)
   - Chat panel readiness detection via `#conversation` element (cascade-panel iframe removed)
   - Bare `<pre>` blocks (pipe tables) no longer produce orphan `</pre>` tags causing Telegram 400 errors
