@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.11] - 2026-03-28
+
+### Fixed
+- Restore compatibility with Antigravity v1.21.6 DOM changes
+  - Model picker selectors updated for `<button>` elements (previously `<div>`)
+  - Chat panel readiness detection via `#conversation` element (cascade-panel iframe removed)
+  - Bare `<pre>` blocks (pipe tables) no longer produce orphan `</pre>` tags causing Telegram 400 errors
+  - `<p>` regex no longer incorrectly matches `<pre>` tags
+
 ## [0.2.2] - 2026-03-02
 
 ### Changed

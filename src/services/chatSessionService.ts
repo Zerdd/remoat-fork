@@ -564,7 +564,7 @@ export class ChatSessionService {
     async startNewChat(cdpService: CdpService): Promise<{ ok: boolean; error?: string }> {
         try {
             // Contexts may be empty right after Antigravity starts.
-            // Wait up to 10 seconds for the cascade-panel to become ready.
+            // Wait up to 10 seconds for the chat panel to become ready.
             let contexts = cdpService.getContexts();
             if (contexts.length === 0) {
                 const ready = await cdpService.waitForCascadePanelReady(10000, 500);

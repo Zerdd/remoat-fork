@@ -54,7 +54,7 @@ const SELECTORS = {
     SUBMIT_BUTTON_CONTAINER: 'button',
     /** Submit icon SVG class candidates */
     SUBMIT_BUTTON_SVG_CLASSES: ['lucide-arrow-right', 'lucide-arrow-up', 'lucide-send'],
-    /** Keyword to identify message injection target context */
+    /** Keyword to identify message injection target context (legacy; removed in v1.21.6+) */
     CONTEXT_URL_KEYWORD: 'cascade-panel',
 };
 
@@ -875,7 +875,7 @@ export class CdpService extends EventEmitter {
     }
 
     getPrimaryContextId(): number | null {
-        // Find cascade-panel context
+        // Legacy: cascade-panel context (removed in v1.21.6+; falls through to first context)
         const context = this.contexts.find(c => c.url && c.url.includes('cascade-panel'));
         if (context) return context.id;
 
@@ -1446,7 +1446,7 @@ export class CdpService extends EventEmitter {
             + '     return text === targetUiNameLower;'
             + '   });'
             + '   if (matchEl) {'
-            // Target the parent element of .font-medium (div with cursor-pointer) for clicking
+            // Target the clickable parent (div.cursor-pointer in legacy; may be <button> in v1.21.6+)
             + '     modeOption = matchEl.closest("div.cursor-pointer") || matchEl.parentElement;'
             + '   }'
             + ' }'
