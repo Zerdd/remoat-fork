@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.13] - 2026-03-28
+
+### Fixed
+- Detect Run/Reject terminal command approval buttons and forward to Telegram (fixes [#5](https://github.com/optimistengineer/remoat/issues/5))
+  - Added `run`/`execute` to allow patterns and `reject` to deny patterns
+  - Fixed container lookup walking up ancestors to find both approve and deny buttons
+  - Telegram inline keyboard now shows actual button labels from Antigravity UI
+  - "Allow Chat" button only shown when available (not for terminal command approvals)
+
 ## [0.2.12] - 2026-03-28
 
 ### Fixed

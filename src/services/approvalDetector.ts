@@ -38,8 +38,8 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         '常に許可',
         'この会話を許可',
     ];
-    const ALLOW_PATTERNS = ['allow', 'permit', '許可', '承認', '確認'];
-    const DENY_PATTERNS = ['deny', '拒否', 'decline'];
+    const ALLOW_PATTERNS = ['allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行'];
+    const DENY_PATTERNS = ['deny', 'reject', '拒否', 'decline', '却下'];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
 
@@ -61,10 +61,20 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
 
     if (!approveBtn) return null;
 
-    const container = approveBtn.closest('[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog')
-        || approveBtn.parentElement?.parentElement
-        || approveBtn.parentElement
-        || document.body;
+    let container = approveBtn.closest('[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog');
+    if (!container) {
+        // Walk up ancestors until we find one that also contains a deny button
+        let el = approveBtn.parentElement;
+        for (let i = 0; i < 6 && el && el !== document.body; i++) {
+            const btns = Array.from(el.querySelectorAll('button')).filter(b => b.offsetParent !== null);
+            if (btns.some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
+                container = el;
+                break;
+            }
+            el = el.parentElement;
+        }
+    }
+    if (!container) container = document.body;
 
     const containerButtons = Array.from(container.querySelectorAll('button'))
         .filter(btn => btn.offsetParent !== null);

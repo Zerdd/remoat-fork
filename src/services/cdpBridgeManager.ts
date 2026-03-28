@@ -287,15 +287,20 @@ export function ensureApprovalDetector(
 
             let text = `🔔 <b>Approval Required</b>\n\n`;
             if (info.description) text += `${escapeHtml(info.description)}\n\n`;
-            text += `<b>Allow:</b> ${escapeHtml(info.approveText)}\n`;
-            text += `<b>Allow Chat:</b> ${escapeHtml(info.alwaysAllowText || 'In Dropdown')}\n`;
+            text += `<b>Approve:</b> ${escapeHtml(info.approveText)}\n`;
+            if (info.alwaysAllowText) text += `<b>Always:</b> ${escapeHtml(info.alwaysAllowText)}\n`;
             text += `<b>Deny:</b> ${escapeHtml(info.denyText || '(None)')}\n`;
             text += `<b>Workspace:</b> ${escapeHtml(projectName)}`;
 
+            // Use actual button labels from the UI
+            const approveLabel = info.approveText.replace(/[⌃⌥⇧⏎⌘\u2318\u2325\u21B5]+/g, '').trim() || 'Allow';
+            const denyLabel = info.denyText || 'Deny';
             const keyboard = new InlineKeyboard()
-                .text('✅ Allow', buildApprovalCustomId('approve', projectName, targetChannelStr))
-                .text('✅ Allow Chat', buildApprovalCustomId('always_allow', projectName, targetChannelStr))
-                .text('❌ Deny', buildApprovalCustomId('deny', projectName, targetChannelStr));
+                .text(`✅ ${approveLabel}`, buildApprovalCustomId('approve', projectName, targetChannelStr));
+            if (info.alwaysAllowText) {
+                keyboard.text('✅ Allow Chat', buildApprovalCustomId('always_allow', projectName, targetChannelStr));
+            }
+            keyboard.text(`❌ ${denyLabel}`, buildApprovalCustomId('deny', projectName, targetChannelStr));
 
             const msgId = await sendTelegramMessage(bridge.botApi, targetChannel, text, keyboard);
             if (msgId) {
