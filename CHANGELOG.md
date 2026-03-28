@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.12] - 2026-03-28
+
+### Fixed
+- Fix stale incremental build cache that omitted `antigravityLauncher` from the published package
+
 ## [0.2.11] - 2026-03-28
 
 ### Fixed
