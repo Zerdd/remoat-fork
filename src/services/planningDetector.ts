@@ -7,7 +7,7 @@ export interface PlanningInfo {
     /** Open button text */
     openText: string;
     /** Proceed button text */
-    proceedText: string;
+    proceedText: string | null;
     /** Plan title (file name shown in the card) */
     planTitle: string;
     /** Plan summary text */
@@ -34,8 +34,8 @@ export interface PlanningDetectorOptions {
  * and extracts plan metadata from the surrounding DOM elements.
  */
 const DETECT_PLANNING_SCRIPT = `(() => {
-    const OPEN_PATTERNS = ['open'];
-    const PROCEED_PATTERNS = ['proceed'];
+    const OPEN_PATTERNS = ['open', 'view'];
+    const PROCEED_PATTERNS = ['proceed', 'accept', 'approve'];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
 
@@ -56,21 +56,27 @@ const DETECT_PLANNING_SCRIPT = `(() => {
         return PROCEED_PATTERNS.some(p => t === p || t.includes(p));
     }) || null;
 
-    // Both buttons must exist for this to be a planning UI
-    if (!openBtn || !proceedBtn) return null;
+    // An Open button must exist for this to be recognized as an artifact card
+    if (!openBtn) return null;
 
     const openText = (openBtn.textContent || '').trim();
-    const proceedText = (proceedBtn.textContent || '').trim();
+    const proceedText = proceedBtn ? (proceedBtn.textContent || '').trim() : null;
 
-    // Extract plan title from .inline-flex.break-all
-    const titleEl = container.querySelector('span.inline-flex.break-all, .inline-flex.break-all');
-    const planTitle = titleEl ? (titleEl.textContent || '').trim() : '';
+    // Extract plan title from .inline-flex.break-all or .font-mono
+    const titleEl = container.querySelector('span.inline-flex.break-all, .inline-flex.break-all, .font-mono.text-sm.truncate, .font-mono.truncate');
+    let planTitle = titleEl ? (titleEl.textContent || '').trim() : '';
+
+    if (!planTitle && openText) {
+        // Fallback: extract from open button text (e.g., "Open task.md" -> "task.md")
+        const match = openText.match(/open\\s+(.*)/i);
+        if (match) planTitle = match[1].trim();
+    }
 
     // Extract plan summary from span.text-sm (excluding buttons text)
     const summaryEls = Array.from(container.querySelectorAll('span.text-sm'));
     const planSummary = summaryEls
         .map(el => (el.textContent || '').trim())
-        .filter(text => text.length > 0 && text !== openText && text !== proceedText)
+        .filter(text => text.length > 0 && text !== openText && text !== proceedText && text !== planTitle)
         .join(' ');
 
     // Extract description from leading-relaxed container, skipping code/style blocks
@@ -151,7 +157,16 @@ const EXTRACT_PLAN_CONTENT_SCRIPT = `(() => {
         }
     }
 
-    // Fallback: any leading-relaxed.select-text with significant content
+    // Fallback 1: Common markdown container classes
+    const mdContainers = Array.from(document.querySelectorAll(
+        '[data-testid="markdown-content"], .markdown-body, .prose'
+    ));
+    for (const container of mdContainers) {
+        const md = htmlToMd(container);
+        if (md.length > 50) return md;
+    }
+
+    // Fallback 2: any leading-relaxed.select-text with significant content
     const allLeading = Array.from(document.querySelectorAll('.leading-relaxed.select-text'));
     for (const el of allLeading) {
         const md = htmlToMd(el);

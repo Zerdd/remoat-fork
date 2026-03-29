@@ -376,14 +376,15 @@ export const RESPONSE_SELECTORS = {
         // --- Quota error ---
         let quotaError = false;
         const scope = panel || document;
-        const QUOTA_KEYWORDS = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_PRIMARY = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_FALLBACK = ['model quota reached', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
         const isInsideResponse = (node) =>
             node.closest('.rendered-markdown, .prose, pre, code, [data-message-author-role="assistant"], [data-message-role="assistant"], [class*="message-content"]');
         const headings = scope.querySelectorAll('h3 span, h3');
         for (const el of headings) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) { quotaError = true; break; }
+            if (QUOTA_KEYWORDS_PRIMARY.some(kw => text.includes(kw))) { quotaError = true; break; }
         }
         if (!quotaError) {
             const inlineSpans = scope.querySelectorAll('span');
@@ -399,7 +400,7 @@ export const RESPONSE_SELECTORS = {
             for (const el of errorElements) {
                 if (isInsideResponse(el)) continue;
                 const text = (el.textContent || '').trim().toLowerCase();
-                if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) { quotaError = true; break; }
+                if (QUOTA_KEYWORDS_FALLBACK.some(kw => text.includes(kw))) { quotaError = true; break; }
             }
         }
 
@@ -408,9 +409,12 @@ export const RESPONSE_SELECTORS = {
         const container = document.querySelector('.notify-user-container');
         if (container) {
             const buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
-            const hasOpen = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'open'; });
-            const hasProceed = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'proceed'; });
-            planningActive = hasOpen && hasProceed;
+            const OPEN_PAT = ['open', 'view'];
+            const PROCEED_PAT = ['proceed', 'accept', 'approve'];
+            const btnNorm = function(btn) { return (btn.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim(); };
+            const hasOpen = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
+            const hasProceed = buttons.some(function(btn) { var t = btnNorm(btn); return PROCEED_PAT.some(function(p) { return t === p || t.includes(p); }); });
+            planningActive = hasOpen;
         }
 
         // --- Legacy text extraction ---
@@ -511,7 +515,8 @@ export const RESPONSE_SELECTORS = {
     QUOTA_ERROR: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
         const scope = panel || document;
-        const QUOTA_KEYWORDS = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_PRIMARY = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_FALLBACK = ['model quota reached', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
         const isInsideResponse = (node) =>
             node.closest('.rendered-markdown, .prose, pre, code, [data-message-author-role="assistant"], [data-message-role="assistant"], [class*="message-content"]');
 
@@ -520,7 +525,7 @@ export const RESPONSE_SELECTORS = {
         for (const el of headings) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) return true;
+            if (QUOTA_KEYWORDS_PRIMARY.some(kw => text.includes(kw))) return true;
         }
 
         // Inline error: "Error You have exhausted your quota on this model."
@@ -548,7 +553,7 @@ export const RESPONSE_SELECTORS = {
         for (const el of errorElements) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) return true;
+            if (QUOTA_KEYWORDS_FALLBACK.some(kw => text.includes(kw))) return true;
         }
         return false;
     })()`,

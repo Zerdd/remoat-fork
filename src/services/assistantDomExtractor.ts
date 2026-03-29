@@ -282,6 +282,107 @@ export function extractAssistantSegmentsPayloadScript(): string {
         }
     }
 
+    // Pass 1.5: Extract artifact cards (planning cards, etc.) from chat
+    var artifactCards = [];
+    var OPEN_PATS_15 = ['open', 'view'];
+    var PROCEED_PATS_15 = ['proceed', 'accept', 'approve'];
+    var btnNorm15 = function(b) { return (b.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+    var allBtns = Array.from(scope.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
+    var openBtn = allBtns.find(function(b) { var t = btnNorm15(b); return OPEN_PATS_15.some(function(p) { return t === p || t.includes(p); }); });
+    var proceedBtn = allBtns.find(function(b) { var t = btnNorm15(b); return PROCEED_PATS_15.some(function(p) { return t === p || t.includes(p); }); });
+    
+    if (openBtn) {
+        var p = openBtn.parentElement;
+        // If both buttons exist, walk up from proceedBtn to their common ancestor
+        if (proceedBtn) {
+            p = proceedBtn.parentElement;
+            while (p && p !== scope && !p.contains(openBtn)) { p = p.parentElement; }
+        }
+        if (p) {
+            var card = p.closest && p.closest('[class*="border"][class*="rounded"]');
+            if (!card) card = p.parentElement && p.parentElement.parentElement;
+            if (card) artifactCards.push(card);
+        }
+    }
+    
+    var notifyCards = Array.from(scope.querySelectorAll('.notify-user-container'));
+    for (var ni = 0; ni < notifyCards.length; ni++) {
+        if (!artifactCards.includes(notifyCards[ni])) artifactCards.push(notifyCards[ni]);
+    }
+
+    for (var ci = 0; ci < artifactCards.length; ci++) {
+        var card = artifactCards[ci];
+        var mdNodes = Array.from(card.querySelectorAll('.rendered-markdown, .markdown-body, .prose'));
+        if (mdNodes.length === 0) {
+            mdNodes = [card];
+        }
+        for (var mi = 0; mi < mdNodes.length; mi++) {
+            var mdNode = mdNodes[mi];
+            var clone = mdNode.cloneNode(true);
+            
+            var cardBtns = clone.querySelectorAll('button');
+            for(var b=0; b<cardBtns.length; b++) cardBtns[b].parentNode.removeChild(cardBtns[b]);
+            
+            var pres = clone.querySelectorAll('pre');
+            for (var pi = 0; pi < pres.length; pi++) {
+                var pre = pres[pi];
+                var langDiv = pre.querySelector('.font-sans.text-sm, [class*="text-sm"][class*="opacity"]');
+                var lang = langDiv ? (langDiv.textContent || '').trim() : '';
+
+                var styles = pre.querySelectorAll('style');
+                for (var si = 0; si < styles.length; si++) {
+                    styles[si].parentNode.removeChild(styles[si]);
+                }
+
+                var headerBar = pre.querySelector('[class*="rounded-t"][class*="border-b"]');
+                if (headerBar) headerBar.parentNode.removeChild(headerBar);
+
+                var codeLines = pre.querySelectorAll('.code-line, [class*="code-line"]');
+                var codeText;
+                if (codeLines.length > 0) {
+                    var lineTexts = [];
+                    for (var cli = 0; cli < codeLines.length; cli++) {
+                        lineTexts.push(codeLines[cli].textContent || '');
+                    }
+                    codeText = lineTexts.join('\\n');
+                } else {
+                    codeText = (pre.innerText || '').trim();
+                    if (lang && codeText.startsWith(lang)) {
+                        codeText = codeText.slice(lang.length).trim();
+                    }
+                }
+                codeText = codeText.replace(/\\nCopy$/i, '').replace(/\\ncopy code$/i, '').trim();
+                
+                var newPre = document.createElement('pre');
+                var newCode = document.createElement('code');
+                if (lang) newCode.setAttribute('class', 'language-' + lang);
+                newCode.textContent = codeText;
+                newPre.appendChild(newCode);
+                pre.parentNode.replaceChild(newPre, pre);
+            }
+            
+            var topStyles = clone.querySelectorAll('style, script');
+            for (var tsi = 0; tsi < topStyles.length; tsi++) {
+                topStyles[tsi].parentNode.removeChild(topStyles[tsi]);
+            }
+            
+            var artifactHtml = clone.innerHTML;
+            if (artifactHtml && artifactHtml.trim()) {
+                if (mdNodes[0] === card) {
+                    artifactHtml = '<div>' + artifactHtml + '</div>';
+                }
+                segments.push({
+                    kind: 'assistant-body',
+                    text: artifactHtml,
+                    role: 'assistant',
+                    messageIndex: 0,
+                    domPath: 'artifact-card'
+                });
+                bodyFound = true;
+            }
+        }
+    }
+
     // Pass 2: Extract thinking + tool segments from <details>
     var details = scope.querySelectorAll('details');
     for (var di = 0; di < details.length; di++) {
