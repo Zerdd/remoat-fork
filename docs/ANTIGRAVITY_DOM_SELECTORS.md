@@ -179,7 +179,7 @@ Open button (with optional Proceed button) for plan and artifact review.
 
 ### Detection
 
-**Crucial Note:** To prevent erroneously detecting older planning cards when a user scrolls up or when buttons resolve slowly, all artifact card searches must be scoped strictly to the latest message container (`[data-message-author-role="assistant"]`).
+**Crucial Note:** The assistant container `[data-message-author-role="assistant"]` does NOT exist in Antigravity. To prevent erroneously detecting older planning cards or infinite "Planning dialog active" deferral loops, all artifact card searches must be positionally scoped to follow the last user message using `Node.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING` (value 4). Furthermore, you must **reverse-iterate** over found artifact cards to interact with the newest one first.
 
 | Selector | Purpose | File |
 |----------|---------|------|

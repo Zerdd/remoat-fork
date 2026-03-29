@@ -25,6 +25,9 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         mockCdpService = new MockedCdpService() as jest.Mocked<CdpService>;
         mockCdpService.getPrimaryContextId = jest.fn().mockReturnValue(42);
         jest.clearAllMocks();
+        // start() now captures a DOM baseline before the first poll.
+        // Set up the default mock so baseline call always returns empty counts.
+        mockCdpService.call.mockResolvedValue({ result: { value: { notifyCount: 0, cardCount: 0, iconCount: 0 } } });
     });
 
     afterEach(async () => {
@@ -33,6 +36,9 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         }
         jest.useRealTimers();
     });
+
+    /** Empty baseline response — consumed by the resetBaseline() call inside start() */
+    const BASELINE_RESP = { result: { value: { notifyCount: 0, cardCount: 0, iconCount: 0 } } };
 
     /** Helper to generate PlanningInfo for testing */
     function makePlanningInfo(overrides: Partial<PlanningInfo> = {}): PlanningInfo {
@@ -159,6 +165,7 @@ describe('PlanningDetector - planning button detection and remote execution', ()
 
         // detected -> disappear -> re-detected (within cooldown)
         mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)                              // baseline (from start())
             .mockResolvedValueOnce({ result: { value: mockInfo } })   // detected
             .mockResolvedValueOnce({ result: { value: null } })       // disappear (key reset)
             .mockResolvedValueOnce({ result: { value: mockInfo } });  // re-detected
@@ -365,6 +372,7 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         const mockInfo = makePlanningInfo();
 
         mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)                            // baseline (from start())
             .mockResolvedValueOnce({ result: { value: mockInfo } })  // 1st: detected
             .mockResolvedValueOnce({ result: { value: null } });     // 2nd: disappeared
 
@@ -389,6 +397,7 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         const mockInfo = makePlanningInfo({ openText: 'Open Plan' });
 
         mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)                                      // baseline (from start())
             .mockResolvedValueOnce({ result: { value: mockInfo } })
             .mockResolvedValueOnce({ result: { value: { ok: true } } });
 
@@ -419,6 +428,7 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         const mockInfo = makePlanningInfo({ proceedText: 'Start Implementation' });
 
         mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)                                      // baseline (from start())
             .mockResolvedValueOnce({ result: { value: mockInfo } })
             .mockResolvedValueOnce({ result: { value: { ok: true } } });
 
@@ -533,6 +543,7 @@ describe('PlanningDetector - planning button detection and remote execution', ()
         const mockInfo = makePlanningInfo();
 
         mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)                            // baseline (from start())
             .mockResolvedValueOnce({ result: { value: mockInfo } })  // detected
             .mockResolvedValueOnce({ result: { value: null } });     // disappeared
 
