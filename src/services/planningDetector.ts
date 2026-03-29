@@ -33,31 +33,67 @@ export interface PlanningDetectorOptions {
  * Looks for Open/Proceed button pairs inside .notify-user-container
  * and extracts plan metadata from the surrounding DOM elements.
  */
-const DETECT_PLANNING_SCRIPT = `(() => {
+const buildDetectPlanningScript = (lastClickedText: string | null) => `(() => {
     const OPEN_PATTERNS = ['open', 'view'];
     const PROCEED_PATTERNS = ['proceed', 'accept', 'approve'];
+    const lastClickedText = ${lastClickedText ? JSON.stringify(lastClickedText) : 'null'};
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
 
-    // Find the notify container that holds planning UI
-    const container = document.querySelector('.notify-user-container');
-    if (!container) return null;
+    // Scope to the latest assistant message to avoid detecting old plans
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-message-role="assistant"], [class*="assistant-message"]'));
+    const latestMsg = messages.length > 0 ? messages[messages.length - 1] : document;
 
-    const allButtons = Array.from(container.querySelectorAll('button'))
-        .filter(btn => btn.offsetParent !== null);
+    // Find the notify container that holds planning UI - prefer the last one
+    const containers = Array.from(document.querySelectorAll('.notify-user-container'));
+    let container = containers.length > 0 ? containers[containers.length - 1] : null;
+    let openBtn = null;
+    let proceedBtn = null;
 
-    const openBtn = allButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
-        return OPEN_PATTERNS.some(p => t === p || t.includes(p));
-    }) || null;
+    if (container) {
+        const allButtons = Array.from(container.querySelectorAll('button')).filter(btn => btn.offsetParent !== null);
+        openBtn = allButtons.find(btn => { const t = normalize(btn.textContent); return OPEN_PATTERNS.some(p => t === p || t.includes(p)); });
+        proceedBtn = allButtons.find(btn => { const t = normalize(btn.textContent); return PROCEED_PATTERNS.some(p => t === p || t.includes(p)); });
+    } else {
+        const docBtns = Array.from(latestMsg.querySelectorAll('button')).filter(btn => btn.offsetParent !== null);
+        openBtn = docBtns.find(btn => { const t = normalize(btn.textContent); return OPEN_PATTERNS.some(p => t === p || t.includes(p)); });
+        proceedBtn = docBtns.find(btn => { const t = normalize(btn.textContent); return PROCEED_PATTERNS.some(p => t === p || t.includes(p)); });
+        
+        if (openBtn) {
+            let p = openBtn.parentElement;
+            if (proceedBtn) {
+                p = proceedBtn.parentElement;
+                while (p && p !== document.body && !p.contains(openBtn)) { p = p.parentElement; }
+            }
+            if (p) {
+                container = p.closest('[class*="border"][class*="rounded"]');
+                if (!container) container = p.parentElement ? p.parentElement.parentElement : null;
+            }
+        }
+    }
 
-    const proceedBtn = allButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
-        return PROCEED_PATTERNS.some(p => t === p || t.includes(p));
-    }) || null;
-
-    // An Open button must exist for this to be recognized as an artifact card
-    if (!openBtn) return null;
+    // Fallback: Check for collapsed artifact cards in the latest message
+    if (!openBtn || !container) {
+        const cards = Array.from(latestMsg.querySelectorAll('div[class*="border"][class*="rounded-lg"]'));
+        for (const card of cards) {
+            const chip = card.querySelector('span[class*="inline-flex"][class*="cursor-pointer"]');
+            if (chip && card.offsetParent !== null) {
+                const text = (chip.textContent || '').trim();
+                const buttons = Array.from(card.querySelectorAll('button'));
+                const hasOpenOrProceed = buttons.some(btn => {
+                    const t = normalize(btn.textContent);
+                    return OPEN_PATTERNS.some(p => t === p || t.includes(p)) || t.includes('proceed');
+                });
+                if (!hasOpenOrProceed) {
+                    if (text && text !== lastClickedText) {
+                        chip.click();
+                        return { collapsed: true, chipText: text };
+                    }
+                }
+            }
+        }
+        return null; // Both failed
+    }
 
     const openText = (openBtn.textContent || '').trim();
     const proceedText = proceedBtn ? (proceedBtn.textContent || '').trim() : null;
@@ -202,6 +238,9 @@ export class PlanningDetector {
     private lastNotifiedAt: number = 0;
     /** Cooldown period in ms to suppress duplicate notifications */
     private static readonly COOLDOWN_MS = 5000;
+    
+    /** Click-guard state to prevent infinite auto-click loops on collapsed cards */
+    private lastClickedChip: { text: string; at: number } | null = null;
 
     constructor(options: PlanningDetectorOptions) {
         this.cdpService = options.cdpService;
@@ -217,12 +256,14 @@ export class PlanningDetector {
         this.lastDetectedKey = null;
         this.lastDetectedInfo = null;
         this.lastNotifiedAt = 0;
+        this.lastClickedChip = null;
         this.schedulePoll();
     }
 
     /** Stop monitoring. */
     async stop(): Promise<void> {
         this.isRunning = false;
+        this.lastClickedChip = null;
         if (this.pollTimer) {
             clearTimeout(this.pollTimer);
             this.pollTimer = null;
@@ -292,9 +333,14 @@ export class PlanningDetector {
      */
     private async poll(): Promise<void> {
         try {
+            // Expire click-guard state after 10 seconds
+            if (this.lastClickedChip && Date.now() - this.lastClickedChip.at > 10000) {
+                this.lastClickedChip = null;
+            }
+
             const contextId = this.cdpService.getPrimaryContextId();
             const callParams: Record<string, unknown> = {
-                expression: DETECT_PLANNING_SCRIPT,
+                expression: buildDetectPlanningScript(this.lastClickedChip?.text || null),
                 returnByValue: true,
                 awaitPromise: false,
             };
@@ -303,9 +349,23 @@ export class PlanningDetector {
             }
 
             const result = await this.cdpService.call('Runtime.evaluate', callParams);
-            const info: PlanningInfo | null = result?.result?.value ?? null;
+            
+            // Expected shape is either PlanningInfo, or { collapsed: true, chipText: string }, or null
+            const payload = result?.result?.value ?? null;
+            
+            if (payload && payload.collapsed) {
+                // We just initiated an auto-click on a collapsed chip
+                this.lastClickedChip = { text: payload.chipText, at: Date.now() };
+                logger.debug(`[PlanningDetector] Auto-clicked collapsed artifact chip: "${payload.chipText}"`);
+                return; // Wait for the next poll cycle to detect the expanded buttons
+            }
+
+            const info: PlanningInfo | null = payload;
 
             if (info) {
+                // Clear click-guard state (successful expansion)
+                this.lastClickedChip = null;
+                
                 // Duplicate prevention: use button text pair as key (stable across DOM redraws)
                 const key = `${info.openText}::${info.proceedText}`;
                 const now = Date.now();
