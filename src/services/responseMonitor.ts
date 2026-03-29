@@ -139,9 +139,12 @@ export const RESPONSE_SELECTORS = {
     })()`,
     /** Check if planning dialog (Open/Proceed buttons) is active */
     PLANNING_ACTIVE: `(() => {
-        var container = document.querySelector('.notify-user-container');
-        if (!container) return false;
-        var buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
+        var messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-message-role="assistant"], [class*="assistant-message"]'));
+        var latestMsg = messages.length > 0 ? messages[messages.length - 1] : document;
+        var containers = Array.from(document.querySelectorAll('.notify-user-container'));
+        var container = containers.length > 0 ? containers[containers.length - 1] : null;
+        var buttons = container ? Array.from(container.querySelectorAll('button')) : Array.from(latestMsg.querySelectorAll('button'));
+        buttons = buttons.filter(function(btn) { return btn.offsetParent !== null; });
         var hasOpen = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'open'; });
         var hasProceed = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'proceed'; });
         return hasOpen && hasProceed;
@@ -406,15 +409,38 @@ export const RESPONSE_SELECTORS = {
 
         // --- Planning active ---
         let planningActive = false;
-        const container = document.querySelector('.notify-user-container');
+        const OPEN_PAT = ['open', 'view'];
+        const btnNorm = function(btn) { return (btn.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim(); };
+        const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-message-role="assistant"], [class*="assistant-message"]'));
+        const latestMsg = messages.length > 0 ? messages[messages.length - 1] : document;
+        const containers = Array.from(document.querySelectorAll('.notify-user-container'));
+        const container = containers.length > 0 ? containers[containers.length - 1] : null;
+
         if (container) {
             const buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
-            const OPEN_PAT = ['open', 'view'];
-            const PROCEED_PAT = ['proceed', 'accept', 'approve'];
-            const btnNorm = function(btn) { return (btn.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim(); };
-            const hasOpen = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
-            const hasProceed = buttons.some(function(btn) { var t = btnNorm(btn); return PROCEED_PAT.some(function(p) { return t === p || t.includes(p); }); });
-            planningActive = hasOpen;
+            planningActive = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
+        } else {
+            const buttons = Array.from(latestMsg.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
+            planningActive = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
+            
+            if (!planningActive) {
+                const cards = Array.from(latestMsg.querySelectorAll('div[class*="border"][class*="rounded-lg"]'));
+                for (let i = 0; i < cards.length; i++) {
+                    const card = cards[i];
+                    const chip = card.querySelector('span[class*="inline-flex"][class*="cursor-pointer"]');
+                    if (chip && card.offsetParent !== null) {
+                        const buttons = Array.from(card.querySelectorAll('button'));
+                        const hasOpenOrProceed = buttons.some(function(btn) {
+                            const t = btnNorm(btn);
+                            return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }) || t.includes('proceed');
+                        });
+                        if (!hasOpenOrProceed) {
+                            planningActive = true;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // --- Legacy text extraction ---

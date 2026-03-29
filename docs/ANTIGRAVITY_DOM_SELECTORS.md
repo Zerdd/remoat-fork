@@ -179,9 +179,13 @@ Open button (with optional Proceed button) for plan and artifact review.
 
 ### Detection
 
+**Crucial Note:** To prevent erroneously detecting older planning cards when a user scrolls up or when buttons resolve slowly, all artifact card searches must be scoped strictly to the latest message container (`[data-message-author-role="assistant"]`).
+
 | Selector | Purpose | File |
 |----------|---------|------|
-| `.notify-user-container` | Planning notification container | `planningDetector.ts` |
+| `.notify-user-container` (last in DOM, or within latest msg) | Planning notification container | `planningDetector.ts` |
+| `div[class*="border"][class*="rounded-lg"]` (within latest msg) | Fallback card container for artifact chips | `planningDetector.ts` |
+| `span[class*="inline-flex"][class*="cursor-pointer"]` | Clickable artifact chip (for auto-expansion if buttons are hidden) | `planningDetector.ts` |
 | `span.inline-flex.break-all` | Plan title (file name) | `planningDetector.ts` |
 | `span.text-sm` | Plan summary text | `planningDetector.ts` |
 | `.leading-relaxed.select-text` | Plan description body | `planningDetector.ts` |
