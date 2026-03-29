@@ -173,9 +173,9 @@ Tool permission dialog (Allow/Deny).
 
 ---
 
-## 8. Planning Mode
+## 8. Planning Mode / Artifact Cards
 
-Open/Proceed button pair for plan review.
+Open button (with optional Proceed button) for plan and artifact review.
 
 ### Detection
 
