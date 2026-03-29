@@ -261,10 +261,11 @@ export class CdpService extends EventEmitter {
 
     async disconnect(): Promise<void> {
         this.stopHeartbeat();
-        // Suppress reconnection during intentional disconnect
-        const savedMaxReconnectAttempts = this.maxReconnectAttempts;
-        this.maxReconnectAttempts = 0;
+        // Suppress 'disconnected' event (and reconnect attempts) during intentional shutdown
+        const prev = this.isSwitchingWorkspace;
+        this.isSwitchingWorkspace = true;
         if (this.ws) {
+            this.ws.removeAllListeners();
             this.ws.close();
             this.ws = null;
         }
@@ -273,8 +274,7 @@ export class CdpService extends EventEmitter {
         this.currentWorkspacePath = null;
         this.currentWorkspaceName = null;
         this.clearPendingCalls(new Error('disconnect() was called'));
-        // Restore so future connect() calls can still reconnect
-        this.maxReconnectAttempts = savedMaxReconnectAttempts;
+        this.isSwitchingWorkspace = prev;
     }
 
     /**

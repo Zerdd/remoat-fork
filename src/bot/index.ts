@@ -449,6 +449,19 @@ async function sendPromptToAntigravity(
     let monitor: ResponseMonitor | null = null;
 
     try {
+        // Reset PlanningDetector baseline BEFORE injecting the message.
+        // This snapshots the current artifact count so the detector only
+        // fires on NEW artifacts from the upcoming response (not old session artifacts).
+        const projectName = cdp.getCurrentWorkspaceName() || bridge.lastActiveWorkspace;
+        if (projectName) {
+            const detector = bridge.pool.getPlanningDetector(projectName);
+            if (detector) {
+                await detector.resetBaseline().catch((err: Error) =>
+                    logger.error('[sendPrompt] PlanningDetector baseline reset failed:', err),
+                );
+            }
+        }
+
         let injectResult;
         if (inboundImages.length > 0) {
             injectResult = await cdp.injectMessageWithImageFiles(prompt, inboundImages.map(i => i.localPath));

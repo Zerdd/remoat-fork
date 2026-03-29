@@ -137,18 +137,8 @@ export const RESPONSE_SELECTORS = {
 
         return { isGenerating: false };
     })()`,
-    /** Check if planning dialog (Open/Proceed buttons) is active */
-    PLANNING_ACTIVE: `(() => {
-        var messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-message-role="assistant"], [class*="assistant-message"]'));
-        var latestMsg = messages.length > 0 ? messages[messages.length - 1] : document;
-        var containers = Array.from(document.querySelectorAll('.notify-user-container'));
-        var container = containers.length > 0 ? containers[containers.length - 1] : null;
-        var buttons = container ? Array.from(container.querySelectorAll('button')) : Array.from(latestMsg.querySelectorAll('button'));
-        buttons = buttons.filter(function(btn) { return btn.offsetParent !== null; });
-        var hasOpen = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'open'; });
-        var hasProceed = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'proceed'; });
-        return hasOpen && hasProceed;
-    })()`,
+    /** Check if planning dialog (Open/Proceed buttons) is active — now baseline-aware */
+    PLANNING_ACTIVE: '(() => false)()', // Deprecated: use COMBINED_POLL with baseline counts
     /** Click stop button via tooltip-id + text fallback */
     CLICK_STOP_BUTTON: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
@@ -350,8 +340,11 @@ export const RESPONSE_SELECTORS = {
 
         return results;
     })()`,
-    /** Combined poll script — stop button + quota error + legacy text in one CDP call */
-    COMBINED_POLL: `(() => {
+    /** Combined poll script — stop button + quota error + legacy text in one CDP call.
+     *  NOTE: The planning section uses BASELINE_NOTIFY and BASELINE_CARD placeholders
+     *  that must be replaced with actual baseline counts before evaluation.
+     *  Use buildCombinedPollScript() to inject the correct values. */
+    COMBINED_POLL_TEMPLATE: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
         const scopes = [panel, document].filter(Boolean);
 
@@ -407,37 +400,40 @@ export const RESPONSE_SELECTORS = {
             }
         }
 
-        // --- Planning active ---
+        // --- Planning active (baseline-aware) ---
         let planningActive = false;
+        const BASELINE_NOTIFY = __BASELINE_NOTIFY__;
+        const BASELINE_CARD = __BASELINE_CARD__;
         const OPEN_PAT = ['open', 'view'];
         const btnNorm = function(btn) { return (btn.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim(); };
-        const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-message-role="assistant"], [class*="assistant-message"]'));
-        const latestMsg = messages.length > 0 ? messages[messages.length - 1] : document;
-        const containers = Array.from(document.querySelectorAll('.notify-user-container'));
-        const container = containers.length > 0 ? containers[containers.length - 1] : null;
+
+        // Only consider .notify-user-container elements beyond the baseline
+        const allContainers = Array.from(document.querySelectorAll('.notify-user-container'));
+        const newContainers = allContainers.slice(BASELINE_NOTIFY);
+        const container = newContainers.length > 0 ? newContainers[newContainers.length - 1] : null;
 
         if (container) {
             const buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
             planningActive = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
-        } else {
-            const buttons = Array.from(latestMsg.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
-            planningActive = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
-            
-            if (!planningActive) {
-                const cards = Array.from(latestMsg.querySelectorAll('div[class*="border"][class*="rounded-lg"]'));
-                for (let i = 0; i < cards.length; i++) {
-                    const card = cards[i];
-                    const chip = card.querySelector('span[class*="inline-flex"][class*="cursor-pointer"]');
-                    if (chip && card.offsetParent !== null) {
-                        const buttons = Array.from(card.querySelectorAll('button'));
-                        const hasOpenOrProceed = buttons.some(function(btn) {
-                            const t = btnNorm(btn);
-                            return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }) || t.includes('proceed');
-                        });
-                        if (!hasOpenOrProceed) {
-                            planningActive = true;
-                            break;
-                        }
+        }
+
+        if (!planningActive) {
+            // Check for collapsed artifact cards beyond baseline
+            const allCards = Array.from(document.body.querySelectorAll('div[class*="border"][class*="rounded-lg"]'));
+            const newCards = allCards.slice(BASELINE_CARD);
+
+            for (let i = newCards.length - 1; i >= 0; i--) {
+                const card = newCards[i];
+                const chip = card.querySelector('span[class*="inline-flex"][class*="cursor-pointer"]');
+                if (chip && card.offsetParent !== null) {
+                    const buttons = Array.from(card.querySelectorAll('button'));
+                    const hasOpenOrProceed = buttons.some(function(btn) {
+                        const t = btnNorm(btn);
+                        return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }) || t.includes('proceed');
+                    });
+                    if (!hasOpenOrProceed) {
+                        planningActive = true;
+                        break;
                     }
                 }
             }
@@ -705,6 +701,13 @@ export class ResponseMonitor {
     /** Consecutive WebSocket error count — stops monitor after threshold */
     private consecutiveWsErrors: number = 0;
 
+    /**
+     * Baseline artifact counts captured at monitoring start.
+     * Used to exclude old-session artifacts from planning-active detection.
+     */
+    private baselineNotifyCount: number = 0;
+    private baselineCardCount: number = 0;
+
     constructor(options: ResponseMonitorOptions) {
         this.cdpService = options.cdpService;
         this.pollIntervalMs = options.pollIntervalMs ?? 2000;
@@ -718,6 +721,17 @@ export class ResponseMonitor {
         this.onPhaseChange = options.onPhaseChange;
         this.onProcessLog = options.onProcessLog;
         this.onThinkingLog = options.onThinkingLog;
+    }
+
+    /**
+     * Build the COMBINED_POLL script with current baseline counts injected.
+     * Replaces __BASELINE_NOTIFY__ and __BASELINE_CARD__ placeholders with
+     * the actual artifact counts captured at monitoring start.
+     */
+    private buildCombinedPollScript(): string {
+        return RESPONSE_SELECTORS.COMBINED_POLL_TEMPLATE
+            .replace('__BASELINE_NOTIFY__', String(this.baselineNotifyCount))
+            .replace('__BASELINE_CARD__', String(this.baselineCardCount));
     }
 
     /** Start monitoring */
@@ -750,6 +764,22 @@ export class ResponseMonitor {
         this.consecutiveWsErrors = 0;
 
         this.onPhaseChange?.(this.currentPhase, null);
+
+        // Capture artifact baseline FIRST — count existing notify containers and cards
+        // so the planning-active check in COMBINED_POLL can skip old-session artifacts
+        try {
+            const baselineResult = await this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(
+                `(() => ({ notifyCount: document.querySelectorAll('.notify-user-container').length, cardCount: document.querySelectorAll('div[class*="border"][class*="rounded-lg"]').length }))()`
+            ));
+            const bl = baselineResult?.result?.value;
+            if (bl) {
+                this.baselineNotifyCount = bl.notifyCount ?? 0;
+                this.baselineCardCount = bl.cardCount ?? 0;
+            }
+            logger.debug(`[ResponseMonitor] Artifact baseline: ${this.baselineNotifyCount} notify, ${this.baselineCardCount} cards`);
+        } catch {
+            // Best-effort; baseline stays at 0 (conservative: may still detect old artifacts)
+        }
 
         // Capture baselines in parallel (text + process logs + optional structured)
         const baselinePromises: Promise<any>[] = [
@@ -983,7 +1013,7 @@ export class ResponseMonitor {
             if (this.extractionMode === 'structured') {
                 // Structured mode: run combined (stop+quota+planning) in parallel with structured extraction
                 const [combinedResult, structuredResult] = await Promise.all([
-                    this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(RESPONSE_SELECTORS.COMBINED_POLL)),
+                    this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(this.buildCombinedPollScript())),
                     this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(RESPONSE_SELECTORS.RESPONSE_STRUCTURED)).catch(() => null),
                 ]);
 
@@ -1044,7 +1074,7 @@ export class ResponseMonitor {
                 // Legacy mode: single combined CDP call gets everything
                 const combinedResult = await this.cdpService.call(
                     'Runtime.evaluate',
-                    this.buildEvaluateParams(RESPONSE_SELECTORS.COMBINED_POLL),
+                    this.buildEvaluateParams(this.buildCombinedPollScript()),
                 );
                 const combined = combinedResult?.result?.value ?? {};
                 isGenerating = !!combined.isGenerating;
