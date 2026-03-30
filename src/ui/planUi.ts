@@ -87,18 +87,31 @@ export function buildPlanNotificationUI(
     targetChannelStr: string,
 ): PlanNotificationUI {
     const description = info.description || info.planSummary || 'A plan has been generated and is awaiting your review.';
+    const planName = info.planTitle || 'Implementation Plan';
+    
+    let typeLabel = 'Plan';
+    if (planName.toLowerCase().includes('task')) typeLabel = 'Task';
+    else if (planName.toLowerCase().includes('walkthrough')) typeLabel = 'Walkthrough';
 
-    let text = `\u{1F4CB} <b>Planning Mode</b>\n\n`;
+    let text = `\u{1F4CB} <b>${typeLabel} Ready</b>\n\n`;
     text += escapeHtml(description) + `\n\n`;
-    text += `<b>Plan:</b> ${escapeHtml(info.planTitle || 'Implementation Plan')}\n`;
+    text += `<b>${typeLabel}:</b> ${escapeHtml(planName)}\n`;
     text += `<b>Workspace:</b> ${escapeHtml(projectName)}`;
 
     const suffix = `${projectName}:${targetChannelStr}`;
-    const keyboard = new InlineKeyboard()
-        .text('\u{1F4D6} View Full Plan', `${PLAN_VIEW_BTN}:${suffix}`)
-        .text('\u25B6 Proceed', `${PLAN_PROCEED_BTN}:${suffix}`)
-        .row()
-        .text('\u270F\uFE0F Edit Plan', `${PLAN_EDIT_BTN}:${suffix}`)
+    const keyboard = new InlineKeyboard();
+
+    const openLabel = info.openText || `Open ${typeLabel}`;
+    keyboard.text(`\u{1F4D6} ${openLabel}`, `${PLAN_VIEW_BTN}:${suffix}`);
+
+    if (info.proceedText) {
+        const proceedLabel = info.proceedText;
+        const proceedIcon = proceedLabel.toLowerCase().includes('accept') || proceedLabel.toLowerCase().includes('approve') ? '✅' : '▶';
+        keyboard.text(`${proceedIcon} ${proceedLabel}`, `${PLAN_PROCEED_BTN}:${suffix}`);
+    }
+
+    keyboard.row()
+        .text(`\u270F\uFE0F Edit ${typeLabel}`, `${PLAN_EDIT_BTN}:${suffix}`)
         .text('\u{1F504} Refresh', `${PLAN_REFRESH_BTN}:${suffix}`);
 
     return { text, keyboard };
@@ -142,11 +155,19 @@ export function buildPlanContentUI(
     currentPage: number,
     projectName: string,
     targetChannelStr: string,
+    planTitle?: string,
+    proceedText?: string,
 ): PlanContentPage {
     const page = pages[currentPage] || '(Page not found)';
     const totalPages = pages.length;
 
-    let text = `<b>\u{1F4CB} Plan Content</b>`;
+    let typeLabel = 'Plan';
+    if (planTitle) {
+        if (planTitle.toLowerCase().includes('task')) typeLabel = 'Task';
+        else if (planTitle.toLowerCase().includes('walkthrough')) typeLabel = 'Walkthrough';
+    }
+
+    let text = `<b>\u{1F4CB} ${typeLabel} Content</b>`;
     if (totalPages > 1) {
         text += ` (${currentPage + 1}/${totalPages})`;
     }
@@ -165,9 +186,12 @@ export function buildPlanContentUI(
         keyboard.row();
     }
 
-    // Action buttons on every plan content page
+    if (proceedText) {
+        const proceedIcon = proceedText.toLowerCase().includes('accept') || proceedText.toLowerCase().includes('approve') ? '✅' : '▶';
+        keyboard.text(`${proceedIcon} ${proceedText}`, `${PLAN_PROCEED_BTN}:${suffix}`);
+    }
+
     keyboard
-        .text('\u25B6 Proceed', `${PLAN_PROCEED_BTN}:${suffix}`)
         .text('\u270F\uFE0F Edit', `${PLAN_EDIT_BTN}:${suffix}`)
         .row()
         .text('\u{1F504} Refresh', `${PLAN_REFRESH_BTN}:${suffix}`)

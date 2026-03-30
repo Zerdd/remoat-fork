@@ -174,14 +174,27 @@ async function sendPromptToAntigravity(
         }
     };
 
-    const editMsg = async (msgId: number, text: string): Promise<void> => {
-        try {
-            const truncated = text.length > TELEGRAM_MSG_LIMIT ? text.slice(0, TELEGRAM_MSG_LIMIT - 20) + '\n...(truncated)' : text;
-            await api.editMessageText(channel.chatId, msgId, truncated, { parse_mode: 'HTML' });
-        } catch (e: any) {
-            const desc = e?.description || e?.message || '';
-            if (!desc.includes('message is not modified')) {
+    const editMsg = async (msgId: number, text: string, maxRetries = 3): Promise<void> => {
+        const truncated = text.length > TELEGRAM_MSG_LIMIT ? text.slice(0, TELEGRAM_MSG_LIMIT - 20) + '\n...(truncated)' : text;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await api.editMessageText(channel.chatId, msgId, truncated, { parse_mode: 'HTML' });
+                break;
+            } catch (e: any) {
+                const desc = e?.description || e?.message || '';
+                if (desc.includes('message is not modified')) {
+                    break;
+                }
+                const retryAfter = e?.parameters?.retry_after;
+                if (retryAfter) {
+                    logger.error(`[editMsg] Too Many Requests: retry after ${retryAfter}s (attempt ${attempt}/${maxRetries})`);
+                    if (attempt < maxRetries) {
+                        await new Promise(r => setTimeout(r, retryAfter * 1000));
+                        continue;
+                    }
+                }
                 logger.error('[editMsg] Failed:', desc);
+                break;
             }
         }
     };
@@ -436,6 +449,19 @@ async function sendPromptToAntigravity(
     let monitor: ResponseMonitor | null = null;
 
     try {
+        // Reset PlanningDetector baseline BEFORE injecting the message.
+        // This snapshots the current artifact count so the detector only
+        // fires on NEW artifacts from the upcoming response (not old session artifacts).
+        const projectName = cdp.getCurrentWorkspaceName() || bridge.lastActiveWorkspace;
+        if (projectName) {
+            const detector = bridge.pool.getPlanningDetector(projectName);
+            if (detector) {
+                await detector.resetBaseline().catch((err: Error) =>
+                    logger.error('[sendPrompt] PlanningDetector baseline reset failed:', err),
+                );
+            }
+        }
+
         let injectResult;
         if (inboundImages.length > 0) {
             injectResult = await cdp.injectMessageWithImageFiles(prompt, inboundImages.map(i => i.localPath));
@@ -457,11 +483,28 @@ async function sendPromptToAntigravity(
         const progressTitle = () => `${PHASE_ICONS.thinking} ${modelLabel}`;
         const progressFooter = () => `⏱️ ${Math.round((Date.now() - startTime) / 1000)}s`;
 
+        let lastProgressTrigger = 0;
+        let progressTriggerTimeout: NodeJS.Timeout | null = null;
+
         /** Trigger a progress message refresh */
         const triggerProgressRefresh = (): void => {
-            liveActivityUpdateVersion += 1;
-            const v = liveActivityUpdateVersion;
-            refreshProgress(progressTitle(), progressFooter(), { expectedVersion: v, skipWhenFinalized: true }).catch(() => { });
+            const now = Date.now();
+            if (now - lastProgressTrigger >= 3000) {
+                if (progressTriggerTimeout) { clearTimeout(progressTriggerTimeout); progressTriggerTimeout = null; }
+                lastProgressTrigger = now;
+                liveActivityUpdateVersion += 1;
+                const v = liveActivityUpdateVersion;
+                refreshProgress(progressTitle(), progressFooter(), { expectedVersion: v, skipWhenFinalized: true }).catch(() => { });
+            } else if (!progressTriggerTimeout) {
+                progressTriggerTimeout = setTimeout(() => {
+                    progressTriggerTimeout = null;
+                    if (isFinalized) return;
+                    lastProgressTrigger = Date.now();
+                    liveActivityUpdateVersion += 1;
+                    const v = liveActivityUpdateVersion;
+                    refreshProgress(progressTitle(), progressFooter(), { expectedVersion: v, skipWhenFinalized: true }).catch(() => { });
+                }, 3000 - (now - lastProgressTrigger));
+            }
         };
 
         await refreshProgress(progressTitle(), progressFooter());
@@ -1393,7 +1436,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                         const pages = paginatePlanContent(planContent);
                         planContentCache.set(chKey, pages);
                         const targetChannelStr = ch.threadId ? String(ch.threadId) : String(ch.chatId);
-                        const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName || '', targetChannelStr);
+                        const lastInfo = detector.getLastDetectedInfo();
+                        const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName || '', targetChannelStr, lastInfo?.planTitle ?? undefined, lastInfo?.proceedText ?? undefined);
                         await bot.api.sendMessage(ch.chatId, pageText, { parse_mode: 'HTML', message_thread_id: ch.threadId, reply_markup: pageKeyboard });
                     }
                 }
@@ -1427,8 +1471,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     const pages = paginatePlanContent(planContent);
                     planContentCache.set(chKey, pages);
                     const targetChannelStr = ch.threadId ? String(ch.threadId) : String(ch.chatId);
-                    const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName, targetChannelStr);
+                    const lastInfo = detector.getLastDetectedInfo();
+                    const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, 0, projectName, targetChannelStr, lastInfo?.planTitle ?? undefined, lastInfo?.proceedText ?? undefined);
                     await bot.api.sendMessage(ch.chatId, pageText, { parse_mode: 'HTML', message_thread_id: ch.threadId, reply_markup: pageKeyboard });
+                } else {
+                    await bot.api.sendMessage(ch.chatId, `\u26A0\uFE0F <b>Extraction Failed</b>\n\nThe ${projectName ? escapeHtml(projectName) : 'workspace'} UI was instructed to open the file, but we couldn't extract the text content to show inside Telegram. Please check your IDE.`, { parse_mode: 'HTML', message_thread_id: ch.threadId });
                 }
             }
             await ctx.answerCallbackQuery({ text: clicked ? 'Opened' : 'Open button not found.' });
@@ -1485,7 +1532,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const pages = planContentCache.get(chKey);
             if (!pages || isNaN(page)) { await ctx.answerCallbackQuery({ text: 'Page not found.' }); return; }
 
-            const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, page, projectName, targetChannelStr || String(ch.chatId));
+            const detector = projectName ? bridge.pool.getPlanningDetector(projectName) : undefined;
+            const lastInfo = detector?.getLastDetectedInfo();
+
+            const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, page, projectName, targetChannelStr || String(ch.chatId), lastInfo?.planTitle ?? undefined, lastInfo?.proceedText ?? undefined);
             try { await ctx.editMessageText(pageText, { parse_mode: 'HTML', reply_markup: pageKeyboard }); } catch { }
             await ctx.answerCallbackQuery({ text: `Page ${page + 1}/${pages.length}` });
             return;

@@ -356,6 +356,17 @@ export function ensurePlanningDetector(
                 lastMessageChatId = targetChannel.chatId;
             }
         },
+        onAutoOpened: async (chipText: string) => {
+            logger.info(`[PlanningDetector:${projectName}] Auto-opened: "${chipText}"`);
+
+            const currentChatTitle = await getCurrentChatTitle(cdp);
+            const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle);
+
+            if (!targetChannel || !bridge.botApi) return;
+
+            const text = `📄 <b>${chipText}</b> opened in <b>${projectName}</b>\n\n<i>Auto-opened — view in Antigravity editor.</i>`;
+            await sendTelegramMessage(bridge.botApi, targetChannel, text);
+        },
     });
 
     detector.start();

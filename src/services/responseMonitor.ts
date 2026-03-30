@@ -137,15 +137,8 @@ export const RESPONSE_SELECTORS = {
 
         return { isGenerating: false };
     })()`,
-    /** Check if planning dialog (Open/Proceed buttons) is active */
-    PLANNING_ACTIVE: `(() => {
-        var container = document.querySelector('.notify-user-container');
-        if (!container) return false;
-        var buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
-        var hasOpen = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'open'; });
-        var hasProceed = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'proceed'; });
-        return hasOpen && hasProceed;
-    })()`,
+    /** Check if planning dialog (Open/Proceed buttons) is active — now baseline-aware */
+    PLANNING_ACTIVE: '(() => false)()', // Deprecated: use COMBINED_POLL with baseline counts
     /** Click stop button via tooltip-id + text fallback */
     CLICK_STOP_BUTTON: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
@@ -347,8 +340,11 @@ export const RESPONSE_SELECTORS = {
 
         return results;
     })()`,
-    /** Combined poll script — stop button + quota error + legacy text in one CDP call */
-    COMBINED_POLL: `(() => {
+    /** Combined poll script — stop button + quota error + legacy text in one CDP call.
+     *  NOTE: The planning section uses BASELINE_NOTIFY and BASELINE_CARD placeholders
+     *  that must be replaced with actual baseline counts before evaluation.
+     *  Use buildCombinedPollScript() to inject the correct values. */
+    COMBINED_POLL_TEMPLATE: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
         const scopes = [panel, document].filter(Boolean);
 
@@ -376,14 +372,15 @@ export const RESPONSE_SELECTORS = {
         // --- Quota error ---
         let quotaError = false;
         const scope = panel || document;
-        const QUOTA_KEYWORDS = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_PRIMARY = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_FALLBACK = ['model quota reached', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
         const isInsideResponse = (node) =>
             node.closest('.rendered-markdown, .prose, pre, code, [data-message-author-role="assistant"], [data-message-role="assistant"], [class*="message-content"]');
         const headings = scope.querySelectorAll('h3 span, h3');
         for (const el of headings) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) { quotaError = true; break; }
+            if (QUOTA_KEYWORDS_PRIMARY.some(kw => text.includes(kw))) { quotaError = true; break; }
         }
         if (!quotaError) {
             const inlineSpans = scope.querySelectorAll('span');
@@ -399,18 +396,47 @@ export const RESPONSE_SELECTORS = {
             for (const el of errorElements) {
                 if (isInsideResponse(el)) continue;
                 const text = (el.textContent || '').trim().toLowerCase();
-                if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) { quotaError = true; break; }
+                if (QUOTA_KEYWORDS_FALLBACK.some(kw => text.includes(kw))) { quotaError = true; break; }
             }
         }
 
-        // --- Planning active ---
+        // --- Planning active (baseline-aware) ---
         let planningActive = false;
-        const container = document.querySelector('.notify-user-container');
+        const BASELINE_NOTIFY = __BASELINE_NOTIFY__;
+        const BASELINE_CARD = __BASELINE_CARD__;
+        const OPEN_PAT = ['open', 'view'];
+        const btnNorm = function(btn) { return (btn.textContent || '').toLowerCase().replace(/\\s+/g, ' ').trim(); };
+
+        // Only consider .notify-user-container elements beyond the baseline
+        const allContainers = Array.from(document.querySelectorAll('.notify-user-container'));
+        const newContainers = allContainers.slice(BASELINE_NOTIFY);
+        const container = newContainers.length > 0 ? newContainers[newContainers.length - 1] : null;
+
         if (container) {
             const buttons = Array.from(container.querySelectorAll('button')).filter(function(btn) { return btn.offsetParent !== null; });
-            const hasOpen = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'open'; });
-            const hasProceed = buttons.some(function(btn) { return (btn.textContent || '').toLowerCase().trim() === 'proceed'; });
-            planningActive = hasOpen && hasProceed;
+            planningActive = buttons.some(function(btn) { var t = btnNorm(btn); return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }); });
+        }
+
+        if (!planningActive) {
+            // Check for collapsed artifact cards beyond baseline
+            const allCards = Array.from(document.body.querySelectorAll('div[class*="border"][class*="rounded-lg"]'));
+            const newCards = allCards.slice(BASELINE_CARD);
+
+            for (let i = newCards.length - 1; i >= 0; i--) {
+                const card = newCards[i];
+                const chip = card.querySelector('span[class*="inline-flex"][class*="cursor-pointer"]');
+                if (chip && card.offsetParent !== null) {
+                    const buttons = Array.from(card.querySelectorAll('button'));
+                    const hasOpenOrProceed = buttons.some(function(btn) {
+                        const t = btnNorm(btn);
+                        return OPEN_PAT.some(function(p) { return t === p || t.includes(p); }) || t.includes('proceed');
+                    });
+                    if (!hasOpenOrProceed) {
+                        planningActive = true;
+                        break;
+                    }
+                }
+            }
         }
 
         // --- Legacy text extraction ---
@@ -511,7 +537,8 @@ export const RESPONSE_SELECTORS = {
     QUOTA_ERROR: `(() => {
         const panel = document.querySelector('.antigravity-agent-side-panel');
         const scope = panel || document;
-        const QUOTA_KEYWORDS = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_PRIMARY = ['model quota reached', 'rate limit', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
+        const QUOTA_KEYWORDS_FALLBACK = ['model quota reached', 'quota exceeded', 'exhausted your quota', 'exhausted quota'];
         const isInsideResponse = (node) =>
             node.closest('.rendered-markdown, .prose, pre, code, [data-message-author-role="assistant"], [data-message-role="assistant"], [class*="message-content"]');
 
@@ -520,7 +547,7 @@ export const RESPONSE_SELECTORS = {
         for (const el of headings) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) return true;
+            if (QUOTA_KEYWORDS_PRIMARY.some(kw => text.includes(kw))) return true;
         }
 
         // Inline error: "Error You have exhausted your quota on this model."
@@ -548,7 +575,7 @@ export const RESPONSE_SELECTORS = {
         for (const el of errorElements) {
             if (isInsideResponse(el)) continue;
             const text = (el.textContent || '').trim().toLowerCase();
-            if (QUOTA_KEYWORDS.some(kw => text.includes(kw))) return true;
+            if (QUOTA_KEYWORDS_FALLBACK.some(kw => text.includes(kw))) return true;
         }
         return false;
     })()`,
@@ -674,6 +701,13 @@ export class ResponseMonitor {
     /** Consecutive WebSocket error count — stops monitor after threshold */
     private consecutiveWsErrors: number = 0;
 
+    /**
+     * Baseline artifact counts captured at monitoring start.
+     * Used to exclude old-session artifacts from planning-active detection.
+     */
+    private baselineNotifyCount: number = 0;
+    private baselineCardCount: number = 0;
+
     constructor(options: ResponseMonitorOptions) {
         this.cdpService = options.cdpService;
         this.pollIntervalMs = options.pollIntervalMs ?? 2000;
@@ -687,6 +721,17 @@ export class ResponseMonitor {
         this.onPhaseChange = options.onPhaseChange;
         this.onProcessLog = options.onProcessLog;
         this.onThinkingLog = options.onThinkingLog;
+    }
+
+    /**
+     * Build the COMBINED_POLL script with current baseline counts injected.
+     * Replaces __BASELINE_NOTIFY__ and __BASELINE_CARD__ placeholders with
+     * the actual artifact counts captured at monitoring start.
+     */
+    private buildCombinedPollScript(): string {
+        return RESPONSE_SELECTORS.COMBINED_POLL_TEMPLATE
+            .replace('__BASELINE_NOTIFY__', String(this.baselineNotifyCount))
+            .replace('__BASELINE_CARD__', String(this.baselineCardCount));
     }
 
     /** Start monitoring */
@@ -719,6 +764,22 @@ export class ResponseMonitor {
         this.consecutiveWsErrors = 0;
 
         this.onPhaseChange?.(this.currentPhase, null);
+
+        // Capture artifact baseline FIRST — count existing notify containers and cards
+        // so the planning-active check in COMBINED_POLL can skip old-session artifacts
+        try {
+            const baselineResult = await this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(
+                `(() => ({ notifyCount: document.querySelectorAll('.notify-user-container').length, cardCount: document.querySelectorAll('div[class*="border"][class*="rounded-lg"]').length }))()`
+            ));
+            const bl = baselineResult?.result?.value;
+            if (bl) {
+                this.baselineNotifyCount = bl.notifyCount ?? 0;
+                this.baselineCardCount = bl.cardCount ?? 0;
+            }
+            logger.debug(`[ResponseMonitor] Artifact baseline: ${this.baselineNotifyCount} notify, ${this.baselineCardCount} cards`);
+        } catch {
+            // Best-effort; baseline stays at 0 (conservative: may still detect old artifacts)
+        }
 
         // Capture baselines in parallel (text + process logs + optional structured)
         const baselinePromises: Promise<any>[] = [
@@ -952,7 +1013,7 @@ export class ResponseMonitor {
             if (this.extractionMode === 'structured') {
                 // Structured mode: run combined (stop+quota+planning) in parallel with structured extraction
                 const [combinedResult, structuredResult] = await Promise.all([
-                    this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(RESPONSE_SELECTORS.COMBINED_POLL)),
+                    this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(this.buildCombinedPollScript())),
                     this.cdpService.call('Runtime.evaluate', this.buildEvaluateParams(RESPONSE_SELECTORS.RESPONSE_STRUCTURED)).catch(() => null),
                 ]);
 
@@ -1013,7 +1074,7 @@ export class ResponseMonitor {
                 // Legacy mode: single combined CDP call gets everything
                 const combinedResult = await this.cdpService.call(
                     'Runtime.evaluate',
-                    this.buildEvaluateParams(RESPONSE_SELECTORS.COMBINED_POLL),
+                    this.buildEvaluateParams(this.buildCombinedPollScript()),
                 );
                 const combined = combinedResult?.result?.value ?? {};
                 isGenerating = !!combined.isGenerating;

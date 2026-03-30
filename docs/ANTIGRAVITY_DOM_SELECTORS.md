@@ -173,15 +173,19 @@ Tool permission dialog (Allow/Deny).
 
 ---
 
-## 8. Planning Mode
+## 8. Planning Mode / Artifact Cards
 
-Open/Proceed button pair for plan review.
+Open button (with optional Proceed button) for plan and artifact review.
 
 ### Detection
 
+**Crucial Note:** The assistant container `[data-message-author-role="assistant"]` does NOT exist in Antigravity. To prevent erroneously detecting older planning cards or infinite "Planning dialog active" deferral loops, all artifact card searches must be positionally scoped to follow the last user message using `Node.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING` (value 4). Furthermore, you must **reverse-iterate** over found artifact cards to interact with the newest one first.
+
 | Selector | Purpose | File |
 |----------|---------|------|
-| `.notify-user-container` | Planning notification container | `planningDetector.ts` |
+| `.notify-user-container` (last in DOM, or within latest msg) | Planning notification container | `planningDetector.ts` |
+| `div[class*="border"][class*="rounded-lg"]` (within latest msg) | Fallback card container for artifact chips | `planningDetector.ts` |
+| `span[class*="inline-flex"][class*="cursor-pointer"]` | Clickable artifact chip (for auto-expansion if buttons are hidden) | `planningDetector.ts` |
 | `span.inline-flex.break-all` | Plan title (file name) | `planningDetector.ts` |
 | `span.text-sm` | Plan summary text | `planningDetector.ts` |
 | `.leading-relaxed.select-text` | Plan description body | `planningDetector.ts` |

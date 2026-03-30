@@ -99,8 +99,9 @@ describe('Lean ResponseMonitor (new API)', () => {
             onPhaseChange: (phase) => { phases.push(phase); },
         });
 
-        // Baseline calls: RESPONSE_TEXT + PROCESS_LOGS in parallel
+        // Baseline calls: 1. Artifact counts, 2. RESPONSE_TEXT, 3. PROCESS_LOGS
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 })) // Artifact counts baseline
             .mockResolvedValueOnce(cdpResult('existing text'))  // RESPONSE_TEXT baseline
             .mockResolvedValueOnce(cdpResult(null));             // PROCESS_LOGS baseline
 
@@ -108,9 +109,9 @@ describe('Lean ResponseMonitor (new API)', () => {
 
         expect(phases).toContain('waiting');
         expect(monitor.getPhase()).toBe('waiting');
-        // Baseline should have been captured via 2 CDP calls:
-        // 1. RESPONSE_TEXT baseline, 2. PROCESS_LOGS baseline
-        expect(cdpService.call).toHaveBeenCalledTimes(2);
+        // Baseline should have been captured via 3 CDP calls:
+        // 1. Artifact counts, 2. RESPONSE_TEXT baseline, 3. PROCESS_LOGS baseline
+        expect(cdpService.call).toHaveBeenCalledTimes(3);
 
         await monitor.stop();
     });
@@ -126,6 +127,7 @@ describe('Lean ResponseMonitor (new API)', () => {
 
         // Baseline: no text
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))   // RESPONSE_TEXT baseline
             .mockResolvedValueOnce(cdpResult(null));   // PROCESS_LOGS baseline
         await monitor.start();
@@ -151,6 +153,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -175,6 +178,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -209,6 +213,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -249,6 +254,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -282,6 +288,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -315,6 +322,7 @@ describe('Lean ResponseMonitor (new API)', () => {
 
         // Baseline captures 'old response'
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult('old response'))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -340,6 +348,7 @@ describe('Lean ResponseMonitor (new API)', () => {
 
         // Baseline captures old response
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult('old response'))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -370,6 +379,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -392,6 +402,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -410,6 +421,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         const monitor = createMonitor();
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -428,6 +440,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         const monitor = createMonitor();
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await monitor.start();
@@ -452,6 +465,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         });
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))
             .mockResolvedValueOnce(cdpResult(null));
         await defaultMonitor.start();
@@ -500,6 +514,7 @@ describe('Lean ResponseMonitor (new API)', () => {
         const monitor = createMonitor();
 
         cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
             .mockResolvedValueOnce(cdpResult(null))   // baseline text
             .mockResolvedValueOnce(cdpResult(null));   // baseline process_logs
         await monitor.start();

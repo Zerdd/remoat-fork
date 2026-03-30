@@ -23,7 +23,7 @@ describe('planUi', () => {
         it('builds notification with all four buttons', () => {
             const { text, keyboard } = buildPlanNotificationUI(info, 'my-project', '12345');
 
-            expect(text).toContain('Planning Mode');
+            expect(text).toContain('Plan Ready');
             expect(text).toContain('refactor-auth.md');
             expect(text).toContain('my-project');
             expect(text).toContain('JWT tokens');
@@ -92,7 +92,7 @@ describe('planUi', () => {
     });
 
     describe('buildPlanContentUI', () => {
-        it('builds single page without navigation buttons', () => {
+        it('builds single page without navigation buttons (no proceedText)', () => {
             const pages = ['Plan content here'];
             const { text, keyboard } = buildPlanContentUI(pages, 0, 'proj', '123');
 
@@ -102,14 +102,25 @@ describe('planUi', () => {
             expect(text).not.toMatch(/\(\d+\/\d+\)/);
 
             const rows = (keyboard as any).inline_keyboard;
-            // Single page: no pagination, but action buttons present
+            // No proceedText → 3 action buttons (Edit, Refresh, View Full)
+            const allButtons = rows.flat();
+            expect(allButtons.length).toBe(3);
+            const cbData = allButtons.map((b: any) => b.callback_data);
+            expect(cbData.some((d: string) => d.includes(PLAN_PROCEED_BTN))).toBe(false);
+            expect(cbData.some((d: string) => d.includes(PLAN_EDIT_BTN))).toBe(true);
+            expect(cbData.some((d: string) => d.includes(PLAN_REFRESH_BTN))).toBe(true);
+            expect(cbData.some((d: string) => d.includes(PLAN_VIEW_BTN))).toBe(true);
+        });
+
+        it('includes Proceed button when proceedText is provided', () => {
+            const pages = ['Plan content here'];
+            const { keyboard } = buildPlanContentUI(pages, 0, 'proj', '123', 'implementation_plan.md', 'Proceed');
+
+            const rows = (keyboard as any).inline_keyboard;
             const allButtons = rows.flat();
             expect(allButtons.length).toBe(4);
             const cbData = allButtons.map((b: any) => b.callback_data);
             expect(cbData.some((d: string) => d.includes(PLAN_PROCEED_BTN))).toBe(true);
-            expect(cbData.some((d: string) => d.includes(PLAN_EDIT_BTN))).toBe(true);
-            expect(cbData.some((d: string) => d.includes(PLAN_REFRESH_BTN))).toBe(true);
-            expect(cbData.some((d: string) => d.includes(PLAN_VIEW_BTN))).toBe(true);
         });
 
         it('builds multi-page with navigation buttons', () => {
