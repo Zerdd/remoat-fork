@@ -1,4 +1,5 @@
 import { ChatSessionRepository } from '../database/chatSessionRepository';
+import { logger } from '../utils/logger';
 import { CdpBridge, TelegramChannel } from './cdpBridgeManager';
 import { CdpService } from './cdpService';
 import { ModeService } from './modeService';
@@ -37,6 +38,8 @@ export interface PromptDispatcherDeps {
         inboundImages?: InboundImageAttachment[],
         options?: PromptDispatchOptions,
     ) => Promise<void>;
+    /** Called after each task completes (success or error). Used for auto-queue fallback. */
+    onTaskComplete?: (channel: TelegramChannel, wsKey: string) => void;
 }
 
 export class PromptDispatcher {
@@ -49,6 +52,26 @@ export class PromptDispatcher {
 
     private channelKey(ch: TelegramChannel): string {
         return ch.threadId ? `${ch.chatId}:${ch.threadId}` : String(ch.chatId);
+    }
+
+    /**
+     * Resolve the workspace lock key for a channel + cdp pair.
+     * Exposed so the interrupt state module can use the same key.
+     */
+    getWorkspaceKey(ch: TelegramChannel, cdp: CdpService): string {
+        const wsName = cdp.getCurrentWorkspaceName();
+        return wsName ? `ws:${wsName}` : this.channelKey(ch);
+    }
+
+    /**
+     * Check if a workspace is currently processing a prompt.
+     * Returns true when a workspace lock is held (generation in progress).
+     */
+    isBusy(ch: TelegramChannel, cdp: CdpService): boolean {
+        const lockKey = this.getWorkspaceKey(ch, cdp);
+        const busy = this.workspaceLocks.has(lockKey);
+        logger.debug(`[PromptDispatcher] isBusy(${lockKey}) = ${busy} (locks: ${this.workspaceLocks.size})`);
+        return busy;
     }
 
     async send(req: PromptDispatchRequest): Promise<void> {
@@ -74,6 +97,7 @@ export class PromptDispatcher {
         ).catch(() => { /* errors handled inside sendPromptImpl */ });
 
         this.workspaceLocks.set(lockKey, current);
+        logger.debug(`[PromptDispatcher] Lock ACQUIRED: ${lockKey} (total: ${this.workspaceLocks.size})`);
         // Also keep per-channel entry so callers that check channel ordering still work
         this.channelLocks.set(chKey, current);
 
@@ -82,10 +106,12 @@ export class PromptDispatcher {
         } finally {
             if (this.workspaceLocks.get(lockKey) === current) {
                 this.workspaceLocks.delete(lockKey);
+                logger.debug(`[PromptDispatcher] Lock RELEASED: ${lockKey} (total: ${this.workspaceLocks.size})`);
             }
             if (this.channelLocks.get(chKey) === current) {
                 this.channelLocks.delete(chKey);
             }
+            this.deps.onTaskComplete?.(req.channel, lockKey);
         }
     }
 }
