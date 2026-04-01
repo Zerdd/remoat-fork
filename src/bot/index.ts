@@ -939,7 +939,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             `/chat — Show current session info\n\n` +
             `<b>⏹️ Control</b>\n` +
             `/stop — Interrupt active LLM generation\n` +
-            `/screenshot — Capture Antigravity screen\n\n` +
+            `/screenshot — Capture Antigravity screen\n` +
+            `/close — Terminate active Antigravity session\n\n` +
             `<b>⚙️ Settings</b>\n` +
             `/mode — Display and change execution mode\n` +
             `/model — Display and change LLM model\n\n` +
@@ -1095,6 +1096,24 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             async (text) => { await ctx.reply(text); },
             getCurrentCdp(bridge),
         );
+    });
+
+    // /close command
+    bot.command('close', async (ctx) => {
+        const ch = getChannel(ctx);
+        const cdp = getCurrentCdp(bridge);
+        if (!cdp) {
+            await ctx.reply('⚠️ No active Antigravity session to close.');
+            return;
+        }
+        const projectName = cdp.getCurrentWorkspaceName();
+        if (!projectName) {
+            await ctx.reply('⚠️ No active project bound to this chat. Cannot close.');
+            return;
+        }
+        await ctx.reply(`🛑 Closing Antigravity workspace: \`${projectName}\`…`);
+        await bridge.pool.closeBrowserWorkspace(projectName);
+        await ctx.reply('✅ Workspace closed. Send a new prompt or use /project to reconnect.');
     });
 
     // /stop command
@@ -1844,7 +1863,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     logger.info('Starting Remoat Telegram bot...');
 
     // Graceful shutdown: close database on exit
-    const closeDb = () => { try { db.close(); } catch { /* ignore */ } };
+    const closeDb = () => { try { db.close(); } catch (e) { logger.debug('[shutdown] db.close() failed:', e); } };
     process.on('exit', closeDb);
     process.on('SIGINT', () => { closeDb(); process.exit(0); });
     process.on('SIGTERM', () => { closeDb(); process.exit(0); });
@@ -1867,6 +1886,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     { command: 'model', description: 'Change LLM model' },
                     { command: 'stop', description: 'Interrupt active generation' },
                     { command: 'screenshot', description: 'Capture Antigravity screen' },
+                    { command: 'close', description: 'Terminate active Antigravity session' },
                     { command: 'template', description: 'Show prompt templates' },
                     { command: 'template_add', description: 'Register a template' },
                     { command: 'template_delete', description: 'Delete a template' },
