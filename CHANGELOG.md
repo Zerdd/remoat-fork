@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.14] - 2026-04-03
+
+### Fixed
+- Prevent tool-call output leakage by scoping extraction to first assistant-body segment ([#12](https://github.com/optimistengineer/remoat/pull/12))
+- Support walkthrough artifacts that lack Proceed buttons — thanks [@jacob-bd](https://github.com/jacob-bd) ([#7](https://github.com/optimistengineer/remoat/pull/7))
+- Wire `fileRefMode` plan actions through bot and supporting services for planning detector
+- Correct planning detector chip selector and add upgrade re-notification
+- Block DOM queries to latest message only in response monitor to prevent stale artifact detection
+- Restrict planning mode detection to latest message only
+- Make injection test platform-aware for key modifier (Cmd vs Ctrl)
+
+### Removed
+- Dead code cleanup: unused `auth` middleware and `processLogBuffer` utility — thanks [@jacob-bd](https://github.com/jacob-bd) ([#9](https://github.com/optimistengineer/remoat/pull/9))
+- Replaced empty `catch {}` blocks with `logger.debug()` calls in CDP bridge and connection pool
+
+### Added
+- CI workflow for PRs and pushes to main
+
 ## [0.2.13] - 2026-03-28
 
 ### Fixed
