@@ -1099,21 +1099,28 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     });
 
     // /close command
+    // Note: any active ResponseMonitor polling the closed workspace will encounter
+    // errors until it times out, since the monitor is not pool-managed.
     bot.command('close', async (ctx) => {
         const ch = getChannel(ctx);
-        const cdp = getCurrentCdp(bridge);
+        const resolved = await resolveWorkspaceAndCdp(ch);
+        const cdp = resolved?.cdp ?? getCurrentCdp(bridge);
         if (!cdp) {
             await ctx.reply('⚠️ No active Antigravity session to close.');
             return;
         }
-        const projectName = cdp.getCurrentWorkspaceName();
+        const projectName = resolved?.projectName ?? cdp.getCurrentWorkspaceName();
         if (!projectName) {
             await ctx.reply('⚠️ No active project bound to this chat. Cannot close.');
             return;
         }
-        await ctx.reply(`🛑 Closing Antigravity workspace: \`${projectName}\`…`);
-        await bridge.pool.closeBrowserWorkspace(projectName);
-        await ctx.reply('✅ Workspace closed. Send a new prompt or use /project to reconnect.');
+        try {
+            await replyHtml(ctx, `🛑 Closing Antigravity workspace: <code>${escapeHtml(projectName)}</code>…`);
+            await bridge.pool.closeBrowserWorkspace(projectName);
+            await ctx.reply('✅ Workspace closed. Send a new prompt or use /project to reconnect.');
+        } catch (e: any) {
+            await ctx.reply(`❌ Error closing workspace: ${e.message}`);
+        }
     });
 
     // /stop command
