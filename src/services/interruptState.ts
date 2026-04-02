@@ -158,22 +158,8 @@ export function clearPendingInterrupts(wsKey: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Mark a workspace key to bypass the busy check on next dispatch.
- */
-export function addBypass(wsKey: string): void {
-    bypassBusyCheck.add(wsKey);
-}
-
-/**
  * Check and consume a bypass flag. Returns true if the bypass was set.
  */
 export function consumeBypass(wsKey: string): boolean {
     return bypassBusyCheck.delete(wsKey);
-}
-
-/**
- * Check if a bypass is set (without consuming it).
- */
-export function hasBypass(wsKey: string): boolean {
-    return bypassBusyCheck.has(wsKey);
 }

@@ -65,18 +65,14 @@ import {
 } from '../ui/planUi';
 import {
     INTERRUPT_QUEUE_PREFIX, INTERRUPT_NOW_PREFIX, INTERRUPT_DISCARD_PREFIX,
-    buildInterruptUI,
+    buildInterruptUI, safeCallbackKey,
 } from '../ui/queueUi';
 import {
     addPendingInterrupt,
     getFirstPendingInterrupt,
-    getAllPendingInterrupts,
-    getQueueDepth,
     shiftPendingInterrupt,
     drainPendingInterrupts,
     hasPendingInterrupts,
-    clearPendingInterrupts,
-
     consumeBypass,
     MAX_QUEUE_DEPTH,
 } from '../services/interruptState';
@@ -830,38 +826,8 @@ async function sendPromptToAntigravity(
         userStopRequestedChannels.delete(channelKey(channel));
         if (elapsedTimer) { clearInterval(elapsedTimer); }
         if (monitor) { await monitor.stop().catch(() => {}); }
-        const resolve = resolveMonitorDone as (() => void) | null;
-        if (resolve) resolve();
-        await sendEmbed(`${PHASE_ICONS.error} Error`, t(`Error occurred during processing: ${e.message}`));
-        // Safety: resolve the gate so the dispatcher lock is released on early errors
-        // (e.g., if monitor.start() throws before onComplete/onTimeout ever fires).
         resolveMonitorDone();
-    }
-
-    // Hold the dispatcher's workspace lock until the monitor finishes.
-    // Without this, sendPromptToAntigravity resolves immediately after
-    // monitor.start() (which only captures baselines and schedules polling),
-    // releasing the lock and allowing concurrent prompts on the same workspace.
-    if (monitorDone) {
-        await monitorDone;
-    }
-
-    // Auto-dispatch any pending interrupt queue items now that the lock is released.
-    // If the user never pressed Queue/Send/Discard, their messages auto-queue here.
-    const wsKey = cdp.getCurrentWorkspaceName() ? `ws:${cdp.getCurrentWorkspaceName()}` : channelKey(channel);
-    if (hasPendingInterrupts(wsKey)) {
-        const pending = drainPendingInterrupts(wsKey);
-        logger.info(`[AutoQueue] Dispatching ${pending.length} pending message(s) for ${wsKey}`);
-        for (const item of pending) {
-            // No bypass needed — lock is already released
-            // We use dynamic import to avoid circular dependency with promptDispatcher
-            // Instead, we re-call sendPromptToAntigravity directly (same call chain as promptDispatcher)
-            sendPromptToAntigravity(
-                bridge, item.channel, item.prompt, item.cdp,
-                modeService, modelService, item.inboundImages,
-                item.options,
-            ).catch((err) => logger.error('[AutoQueue] Dispatch error:', err));
-        }
+        await sendEmbed(`${PHASE_ICONS.error} Error`, t(`Error occurred during processing: ${e.message}`));
     }
 }
 
@@ -898,12 +864,27 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         onTaskComplete: (channel, wsKey) => {
             // Auto-queue fallback: when a task finishes, auto-dispatch any
             // pending interrupts the user hasn't acted on yet.
-            if (!hasPendingInterrupts(wsKey)) return;
+            // Interrupt state uses safeCallbackKey-truncated keys, so match that here.
+            const interruptKey = safeCallbackKey(wsKey);
+            if (!hasPendingInterrupts(interruptKey)) return;
 
-            const queued = drainPendingInterrupts(wsKey);
+            const queued = drainPendingInterrupts(interruptKey);
             logger.info(`[autoQueue] Task done for ${wsKey} — auto-dispatching ${queued.length} queued message(s)`);
 
+            // Extract project name from wsKey (format: "ws:{projectName}" or channel key)
+            const projectName = wsKey.startsWith('ws:') ? wsKey.slice(3) : null;
+
             for (const pending of queued) {
+                // Re-resolve CDP from pool to avoid stale references
+                const freshCdp = projectName ? bridge.pool.getConnected(projectName) : null;
+                if (!freshCdp) {
+                    logger.warn(`[autoQueue] Workspace ${wsKey} no longer connected, discarding queued message`);
+                    if (pending.inboundImages?.length) {
+                        cleanupInboundImageAttachments(pending.inboundImages).catch(() => {});
+                    }
+                    continue;
+                }
+
                 // Edit the interrupt keyboard message to show it was auto-queued
                 if (pending.interruptMsgId && bridge.botApi) {
                     bridge.botApi.editMessageText(
@@ -916,7 +897,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 promptDispatcher.send({
                     channel: pending.channel,
                     prompt: pending.prompt,
-                    cdp: pending.cdp,
+                    cdp: freshCdp,
                     inboundImages: pending.inboundImages,
                     options: pending.options,
                 }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
@@ -1029,7 +1010,6 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             `/chat — Show current session info\n\n` +
             `<b>⏹️ Control</b>\n` +
             `/stop — Interrupt active LLM generation\n` +
-            `/close — Terminate active Antigravity session\n` +
             `/screenshot — Capture Antigravity screen\n\n` +
             `<b>⚙️ Settings</b>\n` +
             `/mode — Display and change execution mode\n` +
@@ -1214,26 +1194,6 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         }
     });
 
-    // /close command
-    bot.command('close', async (ctx) => {
-        const ch = getChannel(ctx);
-        const resolved = await resolveWorkspaceAndCdp(ch);
-        const workspacePath = resolved?.workspacePath;
-
-        if (!workspacePath) {
-            await ctx.reply('⚠️ No active project bound to this chat. Cannot close.');
-            return;
-        }
-
-        const projectName = bridge.pool.extractProjectName(workspacePath);
-        
-        try {
-            await bridge.pool.closeBrowserWorkspace(projectName);
-            await replyHtml(ctx, `<b>🛑 Workspace Closed</b>\nThe browser instance for <code>${escapeHtml(projectName)}</code> has been terminated.`);
-        } catch (e: any) {
-            await ctx.reply(`❌ Error closing workspace: ${e.message}`);
-        }
-    });
     // /project command
     bot.command('project', async (ctx) => {
         const workspaces = workspaceService.scanWorkspaces();
@@ -1694,8 +1654,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     : data.slice(INTERRUPT_DISCARD_PREFIX.length);
 
             if (data.startsWith(INTERRUPT_DISCARD_PREFIX)) {
-                // Discard the first pending interrupt
-                shiftPendingInterrupt(targetKey);
+                // Discard the first pending interrupt and clean up any attached images
+                const discarded = shiftPendingInterrupt(targetKey);
+                if (discarded?.inboundImages?.length) {
+                    cleanupInboundImageAttachments(discarded.inboundImages).catch(() => {});
+                }
                 try { await ctx.editMessageText('🗑 Message discarded.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
                 await ctx.answerCallbackQuery({ text: 'Discarded' });
                 return;
@@ -1708,12 +1671,17 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 return;
             }
 
+            // Re-resolve CDP from pool to avoid dispatching with a stale reference.
+            // For the stop-button click we still use pending.cdp (it targets the running session).
+            const projectName = targetKey.startsWith('ws:') ? targetKey.slice(3) : null;
+            const freshCdp = projectName ? bridge.pool.getConnected(projectName) : null;
+
             if (data.startsWith(INTERRUPT_NOW_PREFIX)) {
                 // Stop current generation, then send the new prompt
                 try { await ctx.editMessageText('⚡ Stopping current task and sending your message…'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
                 await ctx.answerCallbackQuery({ text: 'Stopping & sending...' });
 
-                // Click the stop button in Antigravity
+                // Click the stop button in Antigravity (use pending.cdp — it targets the running session)
                 try {
                     const contextId = pending.cdp.getPrimaryContextId();
                     const callParams: Record<string, unknown> = { expression: RESPONSE_SELECTORS.CLICK_STOP_BUTTON, returnByValue: true, awaitPromise: false };
@@ -1722,12 +1690,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     userStopRequestedChannels.add(channelKey(pending.channel));
                 } catch (e) { logger.debug('[interrupt:now] Stop button click failed:', e); }
 
-                // Dispatch — send() chains on the workspace lock automatically;
-                // no bypass needed (bypass is only checked in the text message handler).
+                const dispatchCdp = freshCdp ?? pending.cdp;
                 promptDispatcher.send({
                     channel: pending.channel,
                     prompt: pending.prompt,
-                    cdp: pending.cdp,
+                    cdp: dispatchCdp,
                     inboundImages: pending.inboundImages,
                     options: pending.options,
                 }).catch((e) => { logger.error('[interrupt:now] dispatch failed:', e); });
@@ -1738,10 +1705,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             try { await ctx.editMessageText('📥 Message queued — will send after current task.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
             await ctx.answerCallbackQuery({ text: 'Queued' });
 
+            const dispatchCdp = freshCdp ?? pending.cdp;
             promptDispatcher.send({
                 channel: pending.channel,
                 prompt: pending.prompt,
-                cdp: pending.cdp,
+                cdp: dispatchCdp,
                 inboundImages: pending.inboundImages,
                 options: pending.options,
             }).catch((e) => { logger.error('[interrupt:queue] dispatch failed:', e); });
@@ -1890,12 +1858,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
         // ── Concurrency gate: check if workspace is busy ────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
         const busy = promptDispatcher.isBusy(ch, resolved.cdp);
-        const bypassed = busy ? consumeBypass(wsKey) : false;
+        const bypassed = busy ? consumeBypass(interruptKey) : false;
         logger.info(`[concurrencyGate] wsKey=${wsKey} busy=${busy} bypassed=${bypassed}`);
         if (busy && !bypassed) {
             const dispatchOptions = { chatSessionService, chatSessionRepo, topicManager, titleGenerator };
-            const position = addPendingInterrupt(wsKey, {
+            const position = addPendingInterrupt(interruptKey, {
                 prompt: text,
                 channel: ch,
                 cdp: resolved.cdp,
@@ -1910,13 +1879,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
             if (position === 1) {
                 // First in queue — show the interrupt keyboard
-                const { text: uiText, keyboard } = buildInterruptUI(wsKey, text);
+                const { text: uiText, keyboard } = buildInterruptUI(interruptKey, text);
                 const sent = await bot.api.sendMessage(ch.chatId, uiText, {
                     parse_mode: 'HTML',
                     message_thread_id: ch.threadId,
                     reply_markup: keyboard,
                 });
-                const pending = getFirstPendingInterrupt(wsKey);
+                const pending = getFirstPendingInterrupt(interruptKey);
                 if (pending) pending.interruptMsgId = sent.message_id;
             } else {
                 await ctx.reply(`📥 Message queued (#${position} in line)`);
@@ -1977,8 +1946,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
-        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(wsKey)) {
-            const position = addPendingInterrupt(wsKey, {
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
                 prompt: caption,
                 channel: ch,
                 cdp: resolved.cdp,
@@ -1994,9 +1964,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
             if (position === 1) {
                 const keyboard = new InlineKeyboard()
-                    .text('📥 Queue', `interrupt:queue:${wsKey}`)
-                    .text('⚡ Stop & Send Now', `interrupt:now:${wsKey}`)
-                    .text('🗑 Discard', `interrupt:discard:${wsKey}`);
+                    .text('📥 Queue', `interrupt:queue:${interruptKey}`)
+                    .text('⚡ Stop & Send Now', `interrupt:now:${interruptKey}`)
+                    .text('🗑 Discard', `interrupt:discard:${interruptKey}`);
                 await replyHtml(ctx,
                     `⏳ <b>AI is still generating a response…</b>\n\n🖼️ Photo message queued.`,
                     keyboard,
@@ -2077,8 +2047,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
-        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(wsKey)) {
-            const position = addPendingInterrupt(wsKey, {
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
                 prompt: transcript,
                 channel: ch,
                 cdp: resolved.cdp,
@@ -2093,9 +2064,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
             if (position === 1) {
                 const keyboard = new InlineKeyboard()
-                    .text('📥 Queue', `interrupt:queue:${wsKey}`)
-                    .text('⚡ Stop & Send Now', `interrupt:now:${wsKey}`)
-                    .text('🗑 Discard', `interrupt:discard:${wsKey}`);
+                    .text('📥 Queue', `interrupt:queue:${interruptKey}`)
+                    .text('⚡ Stop & Send Now', `interrupt:now:${interruptKey}`)
+                    .text('🗑 Discard', `interrupt:discard:${interruptKey}`);
                 const preview = transcript.length > 80 ? transcript.slice(0, 77) + '…' : transcript;
                 await replyHtml(ctx,
                     `⏳ <b>AI is still generating a response…</b>\n\n🎙️ Voice: <i>${escapeHtml(preview)}</i>`,
@@ -2146,7 +2117,6 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     { command: 'mode', description: 'Change execution mode' },
                     { command: 'model', description: 'Change LLM model' },
                     { command: 'stop', description: 'Interrupt active generation' },
-                    { command: 'close', description: 'Terminate active Antigravity session' },
                     { command: 'screenshot', description: 'Capture Antigravity screen' },
                     { command: 'template', description: 'Show prompt templates' },
                     { command: 'template_add', description: 'Register a template' },
