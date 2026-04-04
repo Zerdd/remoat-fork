@@ -43,7 +43,6 @@ import {
 import { classifyAssistantSegments, extractAssistantSegmentsPayloadScript } from '../services/assistantDomExtractor';
 import { buildModeModelLines, splitForEmbedDescription } from '../utils/streamMessageFormatter';
 import { formatForTelegram, splitOutputAndLogs, escapeHtml, splitTelegramHtml } from '../utils/telegramFormatter';
-// ProcessLogBuffer no longer used — progress display uses ordered event stream
 import {
     buildPromptWithAttachmentUrls,
     cleanupInboundImageAttachments,
@@ -64,6 +63,19 @@ import {
     PLAN_VIEW_BTN, PLAN_PROCEED_BTN, PLAN_EDIT_BTN, PLAN_REFRESH_BTN, PLAN_PAGE_PREFIX,
     buildPlanNotificationUI, buildPlanContentUI, paginatePlanContent,
 } from '../ui/planUi';
+import {
+    INTERRUPT_QUEUE_PREFIX, INTERRUPT_NOW_PREFIX, INTERRUPT_DISCARD_PREFIX,
+    buildInterruptUI, safeCallbackKey,
+} from '../ui/queueUi';
+import {
+    addPendingInterrupt,
+    getFirstPendingInterrupt,
+    shiftPendingInterrupt,
+    drainPendingInterrupts,
+    hasPendingInterrupts,
+    consumeBypass,
+    MAX_QUEUE_DEPTH,
+} from '../services/interruptState';
 
 const PHASE_ICONS = {
     sending: '📡',
@@ -112,6 +124,9 @@ function stripHtmlForFile(html: string): string {
 }
 
 const userStopRequestedChannels = new Set<string>();
+
+// Interrupt state is managed by ../services/interruptState.ts
+// (addPendingInterrupt, drainPendingInterrupts, etc.)
 
 /** Channels where the user is expected to type plan edit instructions */
 const planEditPendingChannels = new Map<string, { projectName: string }>();
@@ -443,10 +458,17 @@ async function sendPromptToAntigravity(
             const res = await cdp.call('Runtime.evaluate', callParams);
             const value = res?.result?.value;
             return typeof value === 'string' ? value.trim() : '';
-        } catch { return ''; }
+        } catch (e) { logger.debug('[tryEmergencyExtractText] Failed:', e); return ''; }
     };
 
     let monitor: ResponseMonitor | null = null;
+
+    // Completion gate: holds the PromptDispatcher lock until onComplete/onTimeout fires.
+    // Without this, monitor.start() resolves immediately (it schedules polling via setTimeout),
+    // causing the dispatcher to release the lock while Antigravity is still generating —
+    // allowing a second prompt to inject concurrently and produce duplicate responses.
+    let resolveMonitorDone!: () => void;
+    const monitorDone = new Promise<void>(resolve => { resolveMonitorDone = resolve; });
 
     try {
         // Reset PlanningDetector baseline BEFORE injecting the message.
@@ -582,6 +604,7 @@ async function sendPromptToAntigravity(
                 if (wasStoppedByUser) {
                     logger.info(`[sendPrompt:${monitorTraceId}] Stopped by user`);
                     await sendMsg('⏹️ Generation stopped.');
+                    resolveMonitorDone?.();
                     return;
                 }
 
@@ -602,6 +625,7 @@ async function sendPromptToAntigravity(
                                 await api.sendMessage(channel.chatId, payload.text, { parse_mode: 'HTML', message_thread_id: channel.threadId, reply_markup: payload.keyboard });
                             }
                         } catch (e) { logger.error('[Quota] Failed to send model selection UI:', e); }
+                        resolveMonitorDone();
                         return;
                     }
 
@@ -753,7 +777,7 @@ async function sendPromptToAntigravity(
                                         try {
                                             options.topicManager.setChatId(Number(session.channelId.split(':')[0]));
                                             await options.topicManager.renameTopic(threadId, formattedName);
-                                        } catch { /* topic rename optional */ }
+                                        } catch (e) { logger.debug('[Rename] Topic rename optional, failed:', e); }
                                     }
                                     options.chatSessionRepo.updateDisplayName(channelKey(channel), sessionInfo.title);
                                 }
@@ -762,13 +786,13 @@ async function sendPromptToAntigravity(
                     }
 
                     await sendGeneratedImages(finalOutputText || '');
-                } catch (error) { logger.error(`[sendPrompt:${monitorTraceId}] onComplete failed:`, error); }
+                } catch (error) { logger.error(`[sendPrompt:${monitorTraceId}] onComplete failed:`, error); } finally { resolveMonitorDone?.(); }
             },
-            onTimeout: async (lastText) => {
-                isFinalized = true;
-                if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-                userStopRequestedChannels.delete(channelKey(channel));
+            onTimeout: async (lastText: string) => {
                 try {
+                    isFinalized = true;
+                    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+                    userStopRequestedChannels.delete(channelKey(channel));
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
                     const timeoutText = (lastText && lastText.trim().length > 0) ? lastText : lastProgressText;
                     const timeoutIsHtml = monitor!.getLastExtractionSource() === 'structured';
@@ -782,7 +806,7 @@ async function sendPromptToAntigravity(
                     liveActivityUpdateVersion += 1;
                     thinkingActive = false;
                     await setProgressMessage(`<b>${PHASE_ICONS.timeout} ${escapeHtml(modelLabel)} · ${elapsed}s</b>\n\n${buildProgressBody()}`, { expectedVersion: liveActivityUpdateVersion });
-                } catch (error) { logger.error(`[sendPrompt:${monitorTraceId}] onTimeout failed:`, error); }
+                } catch (error) { logger.error(`[sendPrompt:${monitorTraceId}] onTimeout failed:`, error); } finally { resolveMonitorDone?.(); }
             },
         });
 
@@ -793,11 +817,16 @@ async function sendPromptToAntigravity(
             triggerProgressRefresh();
         }, 5000);
 
+        // Hold the PromptDispatcher lock until the monitor fires onComplete or onTimeout.
+        // This prevents a second incoming prompt from injecting while Antigravity is still generating.
+        await monitorDone;
+
     } catch (e: any) {
         isFinalized = true;
         userStopRequestedChannels.delete(channelKey(channel));
         if (elapsedTimer) { clearInterval(elapsedTimer); }
         if (monitor) { await monitor.stop().catch(() => {}); }
+        resolveMonitorDone();
         await sendEmbed(`${PHASE_ICONS.error} Error`, t(`Error occurred during processing: ${e.message}`));
     }
 }
@@ -832,6 +861,48 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         modeService,
         modelService,
         sendPromptImpl: sendPromptToAntigravity,
+        onTaskComplete: (channel, wsKey) => {
+            // Auto-queue fallback: when a task finishes, auto-dispatch any
+            // pending interrupts the user hasn't acted on yet.
+            // Interrupt state uses safeCallbackKey-truncated keys, so match that here.
+            const interruptKey = safeCallbackKey(wsKey);
+            if (!hasPendingInterrupts(interruptKey)) return;
+
+            const queued = drainPendingInterrupts(interruptKey);
+            logger.info(`[autoQueue] Task done for ${wsKey} — auto-dispatching ${queued.length} queued message(s)`);
+
+            // Extract project name from wsKey (format: "ws:{projectName}" or channel key)
+            const projectName = wsKey.startsWith('ws:') ? wsKey.slice(3) : null;
+
+            for (const pending of queued) {
+                // Re-resolve CDP from pool to avoid stale references
+                const freshCdp = projectName ? bridge.pool.getConnected(projectName) : null;
+                if (!freshCdp) {
+                    logger.warn(`[autoQueue] Workspace ${wsKey} no longer connected, discarding queued message`);
+                    if (pending.inboundImages?.length) {
+                        cleanupInboundImageAttachments(pending.inboundImages).catch(() => {});
+                    }
+                    continue;
+                }
+
+                // Edit the interrupt keyboard message to show it was auto-queued
+                if (pending.interruptMsgId && bridge.botApi) {
+                    bridge.botApi.editMessageText(
+                        pending.channel.chatId,
+                        pending.interruptMsgId,
+                        '📥 Task finished — sending your queued message…',
+                        { parse_mode: 'HTML' },
+                    ).catch((e: any) => { logger.debug('[autoQueue] editMessage failed:', e); });
+                }
+                promptDispatcher.send({
+                    channel: pending.channel,
+                    prompt: pending.prompt,
+                    cdp: freshCdp,
+                    inboundImages: pending.inboundImages,
+                    options: pending.options,
+                }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
+            }
+        },
     });
 
     const slashCommandHandler = new SlashCommandHandler(templateRepo);
@@ -1249,7 +1320,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const { text, keyboard } = await buildModeUI(modeService, { getCurrentCdp: () => getCurrentCdp(bridge) });
             try {
                 await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
-            } catch { /* may fail if unchanged */ }
+            } catch (e) { logger.debug('[modeSelect] editMessageText failed (expected if unchanged):', e); }
             await ctx.answerCallbackQuery({ text: `Mode: ${MODE_DISPLAY_NAMES[selectedMode] || selectedMode}` });
             return;
         }
@@ -1269,7 +1340,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const res = await cdp.setUiModel(modelName);
             if (res.ok) {
                 const payload = await buildModelsUI(cdp, () => bridge.quota.fetchQuota());
-                if (payload) try { await ctx.editMessageText(payload.text, { parse_mode: 'HTML', reply_markup: payload.keyboard }); } catch { }
+                if (payload) try { await ctx.editMessageText(payload.text, { parse_mode: 'HTML', reply_markup: payload.keyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: `Model: ${res.model}` });
             } else {
                 await ctx.answerCallbackQuery({ text: res.error || 'Failed to change model.' });
@@ -1282,7 +1353,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const cdp = getCurrentCdp(bridge);
             if (!cdp) { await ctx.answerCallbackQuery({ text: 'Not connected.' }); return; }
             const payload = await buildModelsUI(cdp, () => bridge.quota.fetchQuota());
-            if (payload) try { await ctx.editMessageText(payload.text, { parse_mode: 'HTML', reply_markup: payload.keyboard }); } catch { }
+            if (payload) try { await ctx.editMessageText(payload.text, { parse_mode: 'HTML', reply_markup: payload.keyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             await ctx.answerCallbackQuery({ text: 'Refreshed' });
             return;
         }
@@ -1292,7 +1363,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const action = data === AUTOACCEPT_BTN_ON ? 'on' : 'off';
             bridge.autoAccept.handle(action);
             await sendAutoAcceptUI(
-                async (text, keyboard) => { try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch { } },
+                async (text, keyboard) => { try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); } },
                 bridge.autoAccept,
             );
             await ctx.answerCallbackQuery({ text: `Auto-accept: ${action.toUpperCase()}` });
@@ -1301,7 +1372,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
         if (data === AUTOACCEPT_BTN_REFRESH) {
             await sendAutoAcceptUI(
-                async (text, keyboard) => { try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch { } },
+                async (text, keyboard) => { try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); } },
                 bridge.autoAccept,
             );
             await ctx.answerCallbackQuery({ text: 'Refreshed' });
@@ -1372,7 +1443,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (!isNaN(page)) {
                 const workspaces = workspaceService.scanWorkspaces();
                 const { text, keyboard } = buildProjectListUI(workspaces, page);
-                try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch { }
+                try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             }
             await ctx.answerCallbackQuery();
             return;
@@ -1389,9 +1460,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (!resolved) {
                 const cdp = getCurrentCdp(bridge);
                 if (!cdp) { await ctx.answerCallbackQuery({ text: 'Not connected.' }); return; }
-                await promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
+                promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } }).catch((e) => logger.error('[template] dispatch failed:', e));
             } else {
-                await promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp: resolved.cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
+                promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp: resolved.cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } }).catch((e) => logger.error('[template] dispatch failed:', e));
             }
             await ctx.answerCallbackQuery({ text: `Running: ${template.name}` });
             return;
@@ -1432,7 +1503,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             else { success = await detector.denyButton(); actionLabel = 'Deny'; }
 
             if (success) {
-                try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+                try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: `${actionLabel} executed.` });
             } else {
                 await ctx.answerCallbackQuery({ text: 'Button not found.' });
@@ -1470,7 +1541,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 await ctx.answerCallbackQuery({ text: clicked ? 'Opened' : 'Open button not found.' });
             } else {
                 const clicked = await detector.clickProceedButton();
-                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: clicked ? 'Proceeding...' : 'Proceed button not found.' });
             }
             return;
@@ -1517,7 +1588,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const clicked = await detector.clickProceedButton();
             if (clicked) {
                 planEditPendingChannels.delete(channelKey(ch));
-                try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+                try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             }
             await ctx.answerCallbackQuery({ text: clicked ? 'Proceeding...' : 'Proceed button not found.' });
             return;
@@ -1541,7 +1612,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const info = detector.getLastDetectedInfo();
             if (info) {
                 const { text: uiText, keyboard: uiKeyboard } = buildPlanNotificationUI(info, projectName, targetChannelStr || String(ch.chatId));
-                try { await ctx.editMessageText(uiText, { parse_mode: 'HTML', reply_markup: uiKeyboard }); } catch { }
+                try { await ctx.editMessageText(uiText, { parse_mode: 'HTML', reply_markup: uiKeyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             }
             await ctx.answerCallbackQuery({ text: 'Refreshed' });
             return;
@@ -1562,7 +1633,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const lastInfo = detector?.getLastDetectedInfo();
 
             const { text: pageText, keyboard: pageKeyboard } = buildPlanContentUI(pages, page, projectName, targetChannelStr || String(ch.chatId), lastInfo?.planTitle ?? undefined, lastInfo?.proceedText ?? undefined);
-            try { await ctx.editMessageText(pageText, { parse_mode: 'HTML', reply_markup: pageKeyboard }); } catch { }
+            try { await ctx.editMessageText(pageText, { parse_mode: 'HTML', reply_markup: pageKeyboard }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             await ctx.answerCallbackQuery({ text: `Page ${page + 1}/${pages.length}` });
             return;
         }
@@ -1576,7 +1647,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
             if (errorAction.action === 'dismiss') {
                 const clicked = await detector.clickDismissButton();
-                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: clicked ? 'Dismissed' : 'Button not found.' });
             } else if (errorAction.action === 'copy_debug') {
                 const clicked = await detector.clickCopyDebugInfoButton();
@@ -1594,16 +1665,87 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 await ctx.answerCallbackQuery({ text: feedbackText });
             } else {
                 const clicked = await detector.clickRetryButton();
-                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { }
+                if (clicked) try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: clicked ? 'Retrying...' : 'Button not found.' });
             }
+            return;
+        }
+
+        // Interrupt buttons (Queue / Send Now / Discard)
+        if (data.startsWith(INTERRUPT_QUEUE_PREFIX) || data.startsWith(INTERRUPT_NOW_PREFIX) || data.startsWith(INTERRUPT_DISCARD_PREFIX)) {
+            const targetKey = data.startsWith(INTERRUPT_QUEUE_PREFIX)
+                ? data.slice(INTERRUPT_QUEUE_PREFIX.length)
+                : data.startsWith(INTERRUPT_NOW_PREFIX)
+                    ? data.slice(INTERRUPT_NOW_PREFIX.length)
+                    : data.slice(INTERRUPT_DISCARD_PREFIX.length);
+
+            if (data.startsWith(INTERRUPT_DISCARD_PREFIX)) {
+                // Discard the first pending interrupt and clean up any attached images
+                const discarded = shiftPendingInterrupt(targetKey);
+                if (discarded?.inboundImages?.length) {
+                    cleanupInboundImageAttachments(discarded.inboundImages).catch(() => {});
+                }
+                try { await ctx.editMessageText('🗑 Message discarded.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
+                await ctx.answerCallbackQuery({ text: 'Discarded' });
+                return;
+            }
+
+            const pending = shiftPendingInterrupt(targetKey);
+            if (!pending) {
+                try { await ctx.editMessageText('✅ Task finished — your message was already processed.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
+                await ctx.answerCallbackQuery({ text: 'Already processed' });
+                return;
+            }
+
+            // Re-resolve CDP from pool to avoid dispatching with a stale reference.
+            // For the stop-button click we still use pending.cdp (it targets the running session).
+            const projectName = targetKey.startsWith('ws:') ? targetKey.slice(3) : null;
+            const freshCdp = projectName ? bridge.pool.getConnected(projectName) : null;
+
+            if (data.startsWith(INTERRUPT_NOW_PREFIX)) {
+                // Stop current generation, then send the new prompt
+                try { await ctx.editMessageText('⚡ Stopping current task and sending your message…'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
+                await ctx.answerCallbackQuery({ text: 'Stopping & sending...' });
+
+                // Click the stop button in Antigravity (use pending.cdp — it targets the running session)
+                try {
+                    const contextId = pending.cdp.getPrimaryContextId();
+                    const callParams: Record<string, unknown> = { expression: RESPONSE_SELECTORS.CLICK_STOP_BUTTON, returnByValue: true, awaitPromise: false };
+                    if (contextId !== null) callParams.contextId = contextId;
+                    await pending.cdp.call('Runtime.evaluate', callParams);
+                    userStopRequestedChannels.add(channelKey(pending.channel));
+                } catch (e) { logger.debug('[interrupt:now] Stop button click failed:', e); }
+
+                const dispatchCdp = freshCdp ?? pending.cdp;
+                promptDispatcher.send({
+                    channel: pending.channel,
+                    prompt: pending.prompt,
+                    cdp: dispatchCdp,
+                    inboundImages: pending.inboundImages,
+                    options: pending.options,
+                }).catch((e) => { logger.error('[interrupt:now] dispatch failed:', e); });
+                return;
+            }
+
+            // INTERRUPT_QUEUE_PREFIX — queue to run after current task finishes
+            try { await ctx.editMessageText('📥 Message queued — will send after current task.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
+            await ctx.answerCallbackQuery({ text: 'Queued' });
+
+            const dispatchCdp = freshCdp ?? pending.cdp;
+            promptDispatcher.send({
+                channel: pending.channel,
+                prompt: pending.prompt,
+                cdp: dispatchCdp,
+                inboundImages: pending.inboundImages,
+                options: pending.options,
+            }).catch((e) => { logger.error('[interrupt:queue] dispatch failed:', e); });
             return;
         }
 
         // Cleanup buttons
         if (data.startsWith(CLEANUP_ARCHIVE_BTN) || data.startsWith(CLEANUP_DELETE_BTN) || data === CLEANUP_CANCEL_BTN) {
             if (data === CLEANUP_CANCEL_BTN) {
-                try { await ctx.editMessageText('Cleanup cancelled.'); } catch { }
+                try { await ctx.editMessageText('Cleanup cancelled.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
                 await ctx.answerCallbackQuery({ text: 'Cancelled' });
                 return;
             }
@@ -1636,10 +1778,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             }
 
             const action = isDelete ? 'deleted' : 'archived';
-            try { await ctx.editMessageText(`✅ Cleanup complete — ${processed} session(s) ${action}.`); } catch { }
+            try { await ctx.editMessageText(`✅ Cleanup complete — ${processed} session(s) ${action}.`); } catch (e) { logger.debug('[editMsg] Telegram edit failed (expected for unmodified):', e); }
             await ctx.answerCallbackQuery({ text: `${processed} session(s) ${action}` });
             return;
         }
+
 
         await ctx.answerCallbackQuery();
     });
@@ -1673,13 +1816,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 return;
             }
             await ctx.reply('Sending plan edit...');
-            await promptDispatcher.send({
+            promptDispatcher.send({
                 channel: ch,
                 prompt: editPrompt,
                 cdp,
                 inboundImages: [],
                 options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-            });
+            }).catch((e) => logger.error('[planEdit] dispatch failed:', e));
             return;
         }
 
@@ -1718,13 +1861,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (result.prompt) {
                 const cdp = getCurrentCdp(bridge);
                 if (cdp) {
-                    await promptDispatcher.send({
+                    promptDispatcher.send({
                         channel: ch,
                         prompt: result.prompt,
                         cdp,
                         inboundImages: [],
                         options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-                    });
+                    }).catch((e) => logger.error('[slashCmd] dispatch failed:', e));
                 } else {
                     await ctx.reply('Not connected to CDP. Send a message first to connect to a project.');
                 }
@@ -1739,6 +1882,44 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             return;
         }
 
+        // ── Concurrency gate: check if workspace is busy ────────────────────
+        const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
+        const busy = promptDispatcher.isBusy(ch, resolved.cdp);
+        const bypassed = busy ? consumeBypass(interruptKey) : false;
+        logger.info(`[concurrencyGate] wsKey=${wsKey} busy=${busy} bypassed=${bypassed}`);
+        if (busy && !bypassed) {
+            const dispatchOptions = { chatSessionService, chatSessionRepo, topicManager, titleGenerator };
+            const position = addPendingInterrupt(interruptKey, {
+                prompt: text,
+                channel: ch,
+                cdp: resolved.cdp,
+                inboundImages: [],
+                options: dispatchOptions,
+            });
+
+            if (position === null) {
+                await ctx.reply(`⚠️ Queue full (${MAX_QUEUE_DEPTH} messages pending). Please wait or /stop the current task.`);
+                return;
+            }
+
+            if (position === 1) {
+                // First in queue — show the interrupt keyboard
+                const { text: uiText, keyboard } = buildInterruptUI(interruptKey, text);
+                const sent = await bot.api.sendMessage(ch.chatId, uiText, {
+                    parse_mode: 'HTML',
+                    message_thread_id: ch.threadId,
+                    reply_markup: keyboard,
+                });
+                const pending = getFirstPendingInterrupt(interruptKey);
+                if (pending) pending.interruptMsgId = sent.message_id;
+            } else {
+                await ctx.reply(`📥 Message queued (#${position} in line)`);
+            }
+            return;
+        }
+        // ── End concurrency gate ────────────────────────────────────────────
+
         const session = chatSessionRepo.findByChannelId(key);
         if (session?.displayName) {
             registerApprovalSessionChannel(bridge, resolved.projectName, session.displayName, ch);
@@ -1752,19 +1933,22 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             }
         } else if (session && !session.isRenamed) {
             try { await chatSessionService.startNewChat(resolved.cdp); }
-            catch { /* continue anyway */ }
+            catch (e) { logger.debug('[startNewChat] Failed, continuing anyway:', e); }
         }
 
         const userMsgDetector = bridge.pool.getUserMessageDetector?.(resolved.projectName);
         if (userMsgDetector) userMsgDetector.addEchoHash(text);
 
-        await promptDispatcher.send({
+        // Fire-and-forget: do NOT await so Grammy can process the next update immediately.
+        // The lock is set synchronously inside send() before its first await,
+        // so isBusy() will see it when the next message handler runs.
+        promptDispatcher.send({
             channel: ch,
             prompt: text,
             cdp: resolved.cdp,
             inboundImages: [],
             options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-        });
+        }).catch((e) => logger.error('[textMsg] dispatch failed:', e));
     });
 
     // Photo message handler
@@ -1786,17 +1970,49 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             String(ctx.message.message_id),
         );
 
-        try {
-            await promptDispatcher.send({
-                channel: ch,
+        // ── Concurrency gate ────────────────────────────────────────────────
+        const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
                 prompt: caption,
+                channel: ch,
                 cdp: resolved.cdp,
                 inboundImages,
                 options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
             });
-        } finally {
-            await cleanupInboundImageAttachments(inboundImages);
+
+            if (position === null) {
+                await cleanupInboundImageAttachments(inboundImages);
+                await ctx.reply(`⚠️ Queue full (${MAX_QUEUE_DEPTH} messages pending). Please wait or /stop the current task.`);
+                return;
+            }
+
+            if (position === 1) {
+                const keyboard = new InlineKeyboard()
+                    .text('📥 Queue', `interrupt:queue:${interruptKey}`)
+                    .text('⚡ Stop & Send Now', `interrupt:now:${interruptKey}`)
+                    .text('🗑 Discard', `interrupt:discard:${interruptKey}`);
+                await replyHtml(ctx,
+                    `⏳ <b>AI is still generating a response…</b>\n\n🖼️ Photo message queued.`,
+                    keyboard,
+                );
+            } else {
+                await ctx.reply(`📥 Photo message queued (#${position} in line)`);
+            }
+            return; // Images kept in interruptState; cleaned up on dispatch or discard
         }
+        // ── End concurrency gate ────────────────────────────────────────────
+
+        // Fire-and-forget; cleanup images after dispatch completes (not immediately)
+        promptDispatcher.send({
+            channel: ch,
+            prompt: caption,
+            cdp: resolved.cdp,
+            inboundImages,
+            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        }).catch((e) => logger.error('[photoMsg] dispatch failed:', e))
+         .finally(() => cleanupInboundImageAttachments(inboundImages).catch(() => {}));
     });
 
     // Voice message handler (voice-to-prompt via local Whisper transcription)
@@ -1841,13 +2057,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (result.prompt) {
                 const cdp = getCurrentCdp(bridge);
                 if (cdp) {
-                    await promptDispatcher.send({
+                    promptDispatcher.send({
                         channel: ch,
                         prompt: result.prompt,
                         cdp,
                         inboundImages: [],
                         options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-                    });
+                    }).catch((e) => logger.error('[voiceCmd] dispatch failed:', e));
                 }
             }
             return;
@@ -1855,16 +2071,51 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
         await ctx.reply(`📝 "${transcript}"`);
 
+        // ── Concurrency gate ────────────────────────────────────────────────
+        const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
+                prompt: transcript,
+                channel: ch,
+                cdp: resolved.cdp,
+                inboundImages: [],
+                options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+            });
+
+            if (position === null) {
+                await ctx.reply(`⚠️ Queue full (${MAX_QUEUE_DEPTH} messages pending). Please wait or /stop the current task.`);
+                return;
+            }
+
+            if (position === 1) {
+                const keyboard = new InlineKeyboard()
+                    .text('📥 Queue', `interrupt:queue:${interruptKey}`)
+                    .text('⚡ Stop & Send Now', `interrupt:now:${interruptKey}`)
+                    .text('🗑 Discard', `interrupt:discard:${interruptKey}`);
+                const preview = transcript.length > 80 ? transcript.slice(0, 77) + '…' : transcript;
+                await replyHtml(ctx,
+                    `⏳ <b>AI is still generating a response…</b>\n\n🎙️ Voice: <i>${escapeHtml(preview)}</i>`,
+                    keyboard,
+                );
+            } else {
+                await ctx.reply(`📥 Voice message queued (#${position} in line)`);
+            }
+            return;
+        }
+        // ── End concurrency gate ────────────────────────────────────────────
+
         const userMsgDetector = bridge.pool.getUserMessageDetector?.(resolved.projectName);
         if (userMsgDetector) userMsgDetector.addEchoHash(transcript);
 
-        await promptDispatcher.send({
+        // Fire-and-forget: same pattern as text handler
+        promptDispatcher.send({
             channel: ch,
             prompt: transcript,
             cdp: resolved.cdp,
             inboundImages: [],
             options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-        });
+        }).catch((e) => logger.error('[voiceMsg] dispatch failed:', e));
     });
 
     logger.info('Starting Remoat Telegram bot...');
