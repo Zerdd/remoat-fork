@@ -144,6 +144,20 @@ USE_TOPICS=true
 > [!TIP]
 > Alternatively, run `npm start -- setup` to use the interactive wizard instead of editing `.env` manually.
 
+### Local Controller Layer (`AgController`)
+
+Remoat separates its Telegram interface from the core Antigravity control logic.
+If you wish to build your own local application, UI, or API layer on top of Remoat's capabilities without using Telegram, you can programmatically interact with Antigravity using the `AgController` class (located in `src/controller/agController.ts`).
+
+The controller exposes standardized methods returning `{ ok, status, summary, error, data }`:
+- `newChat(workspacePath)`
+- `getChatInfo(channelId)`
+- `switchModel(cdp, modelName)`
+- `switchMode(cdp, mode)`
+- `sendTask(channel, cdp, prompt, options)`
+- `getRunStatus(channelId, cdp)`
+- `stopRun(cdp)`
+
 Then start the bot:
 
 ```bash

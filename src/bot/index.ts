@@ -10,6 +10,7 @@ import { parseMessageContent } from '../commands/messageParser';
 import { SlashCommandHandler } from '../commands/slashCommandHandler';
 import { CleanupCommandHandler, CLEANUP_ARCHIVE_BTN, CLEANUP_DELETE_BTN, CLEANUP_CANCEL_BTN } from '../commands/cleanupCommandHandler';
 
+import { AgController } from '../controller/agController';
 import { ModeService, AVAILABLE_MODES, MODE_DISPLAY_NAMES, MODE_DESCRIPTIONS, MODE_UI_NAMES } from '../services/modeService';
 import { ModelService } from '../services/modelService';
 import { TemplateRepository } from '../database/templateRepository';
@@ -905,6 +906,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         },
     });
 
+    const agController = new AgController(bridge, modeService, modelService, chatSessionService, promptDispatcher, chatSessionRepo);
+
     const slashCommandHandler = new SlashCommandHandler(templateRepo);
     const cleanupHandler = new CleanupCommandHandler(chatSessionRepo, workspaceBindingRepo);
 
@@ -1032,11 +1035,21 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
 
     // /mode command
     bot.command('mode', async (ctx) => {
-        await sendModeUI(
-            async (text, keyboard) => { await replyHtml(ctx, text, keyboard); },
-            modeService,
-            { getCurrentCdp: () => getCurrentCdp(bridge) },
-        );
+        const modeName = ctx.match?.trim();
+        const ch = getChannel(ctx);
+        const resolved = await resolveWorkspaceAndCdp(ch);
+        const cdp = resolved?.cdp ?? getCurrentCdp(bridge);
+
+        if (modeName && cdp) {
+            const res = await agController.switchMode(cdp, modeName);
+            await ctx.reply(res.ok ? `✅ ${res.summary}` : `⚠️ ${res.summary}`);
+        } else {
+            await sendModeUI(
+                async (text, keyboard) => { await replyHtml(ctx, text, keyboard); },
+                modeService,
+                { getCurrentCdp: () => getCurrentCdp(bridge) },
+            );
+        }
     });
 
     // /model command
@@ -1048,9 +1061,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (modelName) {
             const cdp = getCdp();
             if (!cdp) { await ctx.reply('Not connected to CDP. Send a message first to connect.'); return; }
-            const res = await cdp.setUiModel(modelName);
-            if (res.ok) { await ctx.reply(`Model changed to <b>${escapeHtml(res.model || modelName)}</b>.`, { parse_mode: 'HTML' }); }
-            else { await ctx.reply(res.error || 'Failed to change model.'); }
+            const res = await agController.switchModel(cdp, modelName);
+            if (res.ok) { await ctx.reply(`Model changed to <b>${escapeHtml(res.data?.model || modelName)}</b>.`, { parse_mode: 'HTML' }); }
+            else { await ctx.reply(res.error || res.summary); }
         } else {
             await sendModelsUI(
                 async (text, keyboard) => { await replyHtml(ctx, text, keyboard); },
@@ -1202,18 +1215,14 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (!cdp) { await ctx.reply('⚠️ Not connected to CDP.'); return; }
 
         try {
-            const contextId = cdp.getPrimaryContextId();
-            const callParams: Record<string, unknown> = { expression: RESPONSE_SELECTORS.CLICK_STOP_BUTTON, returnByValue: true, awaitPromise: false };
-            if (contextId !== null) callParams.contextId = contextId;
-            const result = await cdp.call('Runtime.evaluate', callParams);
-            const value = result?.result?.value;
+            const res = await agController.stopRun(cdp);
 
-            if (value?.ok) {
+            if (res.ok) {
                 const ch = getChannel(ctx);
                 userStopRequestedChannels.add(channelKey(ch));
                 await replyHtml(ctx, `<b>⏹️ Generation Interrupted</b>\nAI response generation was safely stopped.`);
             } else {
-                await replyHtml(ctx, `<b>⚠️ Could Not Stop</b>\n${escapeHtml(value?.error || 'Stop button not found.')}`);
+                await replyHtml(ctx, `<b>⚠️ Could Not Stop</b>\n${escapeHtml(res.error || 'Stop button not found.')}`);
             }
         } catch (e: any) {
             await ctx.reply(`❌ Error during stop: ${e.message}`);
@@ -1241,19 +1250,12 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         }
 
         const workspacePath = workspaceService.getWorkspacePath(workspaceName);
-        let cdp;
-        try { cdp = await bridge.pool.getOrConnect(workspacePath); }
-        catch (e: any) { await ctx.reply(`⚠️ Failed to connect: ${e.message}`); return; }
-
-        try {
-            const chatResult = await chatSessionService.startNewChat(cdp);
-            if (chatResult.ok) {
-                await replyHtml(ctx, `<b>💬 New Chat Started</b>\nSend your message now.`);
-            } else {
-                await ctx.reply(`⚠️ Could not start new chat: ${chatResult.error}`);
-            }
-        } catch (e: any) {
-            await ctx.reply(`⚠️ Error: ${e.message}`);
+        const res = await agController.newChat(workspacePath);
+        
+        if (res.ok) {
+            await replyHtml(ctx, `<b>💬 New Chat Started</b>\nSend your message now.`);
+        } else {
+            await ctx.reply(`⚠️ ${res.summary}: ${res.error || ''}`);
         }
     });
 
@@ -1261,38 +1263,37 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     bot.command('chat', async (ctx) => {
         const ch = getChannel(ctx);
         const key = channelKey(ch);
-        const session = chatSessionRepo.findByChannelId(key);
+        const res = await agController.getChatInfo(key);
 
-        if (!session) {
-            const activeNames = bridge.pool.getActiveWorkspaceNames();
-            const anyCdp = activeNames.length > 0 ? bridge.pool.getConnected(activeNames[0]) : null;
-            const info = anyCdp
-                ? await chatSessionService.getCurrentSessionInfo(anyCdp)
-                : { title: '(CDP Disconnected)', hasActiveChat: false };
+        if (res.ok && res.data) {
+            if (res.data.currentSession) {
+                const session = res.data.currentSession;
+                const allSessions = res.data.sessions;
+                const sessionList = allSessions.map((s: any) => {
+                    const name = s.displayName || `session-${s.sessionNumber}`;
+                    const current = s.channelId === key ? ' ← Current' : '';
+                    return `• ${name}${current}`;
+                }).join('\n');
 
-            await replyHtml(ctx,
-                `<b>💬 Chat Session Info</b>\n\n` +
-                `<b>Title:</b> ${escapeHtml(info.title)}\n` +
-                `<b>Status:</b> ${info.hasActiveChat ? '🟢 Active' : '⚪ Inactive'}\n\n` +
-                `<i>Use /project to bind a project first.</i>`
-            );
-            return;
+                await replyHtml(ctx,
+                    `<b>💬 Chat Session Info</b>\n\n` +
+                    `<b>Current:</b> #${session.sessionNumber} — ${escapeHtml(session.displayName || '(Unset)')}\n` +
+                    `<b>Project:</b> ${escapeHtml(session.workspacePath)}\n` +
+                    `<b>Total sessions:</b> ${res.data.totalSessions}\n\n` +
+                    `<b>Sessions:</b>\n${escapeHtml(sessionList)}`
+                );
+            } else {
+                const info = res.data;
+                await replyHtml(ctx,
+                    `<b>💬 Chat Session Info</b>\n\n` +
+                    `<b>Title:</b> ${escapeHtml(info.title)}\n` +
+                    `<b>Status:</b> ${info.hasActiveChat ? '🟢 Active' : '⚪ Inactive'}\n\n` +
+                    `<i>Use /project to bind a project first.</i>`
+                );
+            }
+        } else {
+            await ctx.reply(`⚠️ Failed to get chat info: ${res.error || res.summary}`);
         }
-
-        const allSessions = chatSessionRepo.findByCategoryId(session.categoryId);
-        const sessionList = allSessions.map(s => {
-            const name = s.displayName || `session-${s.sessionNumber}`;
-            const current = s.channelId === key ? ' ← Current' : '';
-            return `• ${name}${current}`;
-        }).join('\n');
-
-        await replyHtml(ctx,
-            `<b>💬 Chat Session Info</b>\n\n` +
-            `<b>Current:</b> #${session.sessionNumber} — ${escapeHtml(session.displayName || '(Unset)')}\n` +
-            `<b>Project:</b> ${escapeHtml(session.workspacePath)}\n` +
-            `<b>Total sessions:</b> ${allSessions.length}\n\n` +
-            `<b>Sessions:</b>\n${escapeHtml(sessionList)}`
-        );
     });
 
     // /ping command
@@ -1460,9 +1461,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (!resolved) {
                 const cdp = getCurrentCdp(bridge);
                 if (!cdp) { await ctx.answerCallbackQuery({ text: 'Not connected.' }); return; }
-                promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } }).catch((e) => logger.error('[template] dispatch failed:', e));
+                agController.sendTask(ch, cdp, template.prompt, { dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
             } else {
-                promptDispatcher.send({ channel: ch, prompt: template.prompt, cdp: resolved.cdp, inboundImages: [], options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } }).catch((e) => logger.error('[template] dispatch failed:', e));
+                agController.sendTask(ch, resolved.cdp, template.prompt, { dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
             }
             await ctx.answerCallbackQuery({ text: `Running: ${template.name}` });
             return;
@@ -1717,13 +1718,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 } catch (e) { logger.debug('[interrupt:now] Stop button click failed:', e); }
 
                 const dispatchCdp = freshCdp ?? pending.cdp;
-                promptDispatcher.send({
-                    channel: pending.channel,
-                    prompt: pending.prompt,
-                    cdp: dispatchCdp,
+                agController.sendTask(pending.channel, dispatchCdp, pending.prompt, {
                     inboundImages: pending.inboundImages,
-                    options: pending.options,
-                }).catch((e) => { logger.error('[interrupt:now] dispatch failed:', e); });
+                    dispatchOptions: pending.options,
+                });
                 return;
             }
 
@@ -1732,13 +1730,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             await ctx.answerCallbackQuery({ text: 'Queued' });
 
             const dispatchCdp = freshCdp ?? pending.cdp;
-            promptDispatcher.send({
-                channel: pending.channel,
-                prompt: pending.prompt,
-                cdp: dispatchCdp,
+            agController.sendTask(pending.channel, dispatchCdp, pending.prompt, {
                 inboundImages: pending.inboundImages,
-                options: pending.options,
-            }).catch((e) => { logger.error('[interrupt:queue] dispatch failed:', e); });
+                dispatchOptions: pending.options,
+            });
             return;
         }
 
@@ -1816,13 +1811,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 return;
             }
             await ctx.reply('Sending plan edit...');
-            promptDispatcher.send({
-                channel: ch,
-                prompt: editPrompt,
-                cdp,
-                inboundImages: [],
-                options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-            }).catch((e) => logger.error('[planEdit] dispatch failed:', e));
+            agController.sendTask(ch, cdp, editPrompt, {
+                dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+            });
             return;
         }
 
@@ -1861,13 +1852,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (result.prompt) {
                 const cdp = getCurrentCdp(bridge);
                 if (cdp) {
-                    promptDispatcher.send({
-                        channel: ch,
-                        prompt: result.prompt,
-                        cdp,
-                        inboundImages: [],
-                        options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-                    }).catch((e) => logger.error('[slashCmd] dispatch failed:', e));
+                    agController.sendTask(ch, cdp, result.prompt, {
+                        dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+                    });
                 } else {
                     await ctx.reply('Not connected to CDP. Send a message first to connect to a project.');
                 }
@@ -1885,7 +1872,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate: check if workspace is busy ────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
-        const busy = promptDispatcher.isBusy(ch, resolved.cdp);
+        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
+        const busy = statusRes.data?.isBusy ?? false;
         const bypassed = busy ? consumeBypass(interruptKey) : false;
         logger.info(`[concurrencyGate] wsKey=${wsKey} busy=${busy} bypassed=${bypassed}`);
         if (busy && !bypassed) {
@@ -1973,7 +1961,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
-        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+        
+        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
+        const isBusy = statusRes.data?.isBusy ?? false;
+        
+        if (isBusy && !consumeBypass(interruptKey)) {
             const position = addPendingInterrupt(interruptKey, {
                 prompt: caption,
                 channel: ch,
@@ -2005,14 +1997,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── End concurrency gate ────────────────────────────────────────────
 
         // Fire-and-forget; cleanup images after dispatch completes (not immediately)
-        promptDispatcher.send({
-            channel: ch,
-            prompt: caption,
-            cdp: resolved.cdp,
+        agController.sendTask(ch, resolved.cdp, caption, {
             inboundImages,
-            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-        }).catch((e) => logger.error('[photoMsg] dispatch failed:', e))
-         .finally(() => cleanupInboundImageAttachments(inboundImages).catch(() => {}));
+            dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        }).finally(() => cleanupInboundImageAttachments(inboundImages).catch(() => {}));
     });
 
     // Voice message handler (voice-to-prompt via local Whisper transcription)
@@ -2074,7 +2062,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
-        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+        
+        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
+        const isBusy = statusRes.data?.isBusy ?? false;
+        
+        if (isBusy && !consumeBypass(interruptKey)) {
             const position = addPendingInterrupt(interruptKey, {
                 prompt: transcript,
                 channel: ch,
@@ -2109,13 +2101,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (userMsgDetector) userMsgDetector.addEchoHash(transcript);
 
         // Fire-and-forget: same pattern as text handler
-        promptDispatcher.send({
-            channel: ch,
-            prompt: transcript,
-            cdp: resolved.cdp,
-            inboundImages: [],
-            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-        }).catch((e) => logger.error('[voiceMsg] dispatch failed:', e));
+        agController.sendTask(ch, resolved.cdp, transcript, {
+            dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        });
     });
 
     logger.info('Starting Remoat Telegram bot...');
