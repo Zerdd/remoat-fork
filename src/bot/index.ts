@@ -895,13 +895,15 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                         { parse_mode: 'HTML' },
                     ).catch((e: any) => { logger.debug('[autoQueue] editMessage failed:', e); });
                 }
-                promptDispatcher.send({
-                    channel: pending.channel,
-                    prompt: pending.prompt,
-                    cdp: freshCdp,
-                    inboundImages: pending.inboundImages,
-                    options: pending.options,
-                }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
+                if (projectName) {
+                    const workspacePath = workspaceService.getWorkspacePath(projectName);
+                    agController.sendTask(workspacePath, pending.prompt, {
+                        chatId: pending.channel.chatId,
+                        threadId: pending.channel.threadId,
+                        inboundImages: pending.inboundImages,
+                        dispatchOptions: pending.options,
+                    }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
+                }
             }
         },
     });
@@ -1460,13 +1462,15 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (!template) { await ctx.answerCallbackQuery({ text: 'Template not found.' }); return; }
 
             const resolved = await resolveWorkspaceAndCdp(ch);
-            if (!resolved) {
-                const cdp = getCurrentCdp(bridge);
-                if (!cdp) { await ctx.answerCallbackQuery({ text: 'Not connected.' }); return; }
-                agController.sendTask(ch, cdp, template.prompt, { dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
-            } else {
-                agController.sendTask(ch, resolved.cdp, template.prompt, { dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator } });
-            }
+            const wsName = resolved?.projectName || getCurrentCdp(bridge)?.getCurrentWorkspaceName();
+            if (!wsName) { await ctx.answerCallbackQuery({ text: 'Not connected.' }); return; }
+            const workspacePath = workspaceService.getWorkspacePath(wsName);
+            
+            agController.sendTask(workspacePath, template.prompt, {
+                chatId: ch.chatId,
+                threadId: ch.threadId,
+                dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator }
+            });
             await ctx.answerCallbackQuery({ text: `Running: ${template.name}` });
             return;
         }
@@ -1720,7 +1724,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 } catch (e) { logger.debug('[interrupt:now] Stop button click failed:', e); }
 
                 const dispatchCdp = freshCdp ?? pending.cdp;
-                agController.sendTask(pending.channel, dispatchCdp, pending.prompt, {
+                const wsName = dispatchCdp.getCurrentWorkspaceName();
+                const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+                agController.sendTask(workspacePath, pending.prompt, {
+                    chatId: pending.channel.chatId,
+                    threadId: pending.channel.threadId,
                     inboundImages: pending.inboundImages,
                     dispatchOptions: pending.options,
                 });
@@ -1732,7 +1740,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             await ctx.answerCallbackQuery({ text: 'Queued' });
 
             const dispatchCdp = freshCdp ?? pending.cdp;
-            agController.sendTask(pending.channel, dispatchCdp, pending.prompt, {
+            const wsName = dispatchCdp.getCurrentWorkspaceName();
+            const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+            agController.sendTask(workspacePath, pending.prompt, {
+                chatId: pending.channel.chatId,
+                threadId: pending.channel.threadId,
                 inboundImages: pending.inboundImages,
                 dispatchOptions: pending.options,
             });
@@ -1813,7 +1825,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 return;
             }
             await ctx.reply('Sending plan edit...');
-            agController.sendTask(ch, cdp, editPrompt, {
+            const wsName = cdp.getCurrentWorkspaceName();
+            const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+            agController.sendTask(workspacePath, editPrompt, {
+                chatId: ch.chatId,
+                threadId: ch.threadId,
                 dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
             });
             return;
@@ -1927,7 +1943,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 return;
             }
         } else if (session && !session.isRenamed) {
-            try { await chatSessionService.startNewChat(resolved.cdp); }
+            try { await agController.newChat(workspacePath); }
             catch (e) { logger.debug('[startNewChat] Failed, continuing anyway:', e); }
         }
 
