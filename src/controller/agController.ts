@@ -65,36 +65,17 @@ export class AgController {
     /**
      * Get chat session info.
      */
-    public async getChatInfo(channelId?: string): Promise<AgCommandResult> {
+    public async getChatInfo(workspacePath: string): Promise<AgCommandResult> {
         try {
-            if (channelId) {
-                const session = this.chatSessionRepo.findByChannelId(channelId);
-                if (session) {
-                    const allSessions = this.chatSessionRepo.findByCategoryId(session.categoryId);
-                    return {
-                        ok: true,
-                        status: 'success',
-                        summary: 'Retrieved chat info for channel.',
-                        data: {
-                            currentSession: session,
-                            totalSessions: allSessions.length,
-                            sessions: allSessions
-                        }
-                    };
-                }
-            }
-
-            // Fallback to active pool
-            const activeNames = this.bridge.pool.getActiveWorkspaceNames();
-            const anyCdp = activeNames.length > 0 ? this.bridge.pool.getConnected(activeNames[0]) : null;
-            const info = anyCdp
-                ? await this.chatSessionService.getCurrentSessionInfo(anyCdp)
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            const info = cdp
+                ? await this.chatSessionService.getCurrentSessionInfo(cdp)
                 : { title: '(CDP Disconnected)', hasActiveChat: false };
 
             return {
                 ok: true,
                 status: 'success',
-                summary: 'Retrieved global chat info.',
+                summary: 'Retrieved chat info.',
                 data: info
             };
         } catch (e: any) {
@@ -110,8 +91,12 @@ export class AgController {
     /**
      * Switch current model.
      */
-    public async switchModel(cdp: CdpService, modelName: string): Promise<AgCommandResult> {
+    public async switchModel(workspacePath: string, modelName: string): Promise<AgCommandResult> {
         try {
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            if (!cdp) {
+                return { ok: false, status: 'error', summary: 'Workspace is not connected to CDP.' };
+            }
             const res = await cdp.setUiModel(modelName);
             if (res.ok) {
                 return {
@@ -141,8 +126,12 @@ export class AgController {
     /**
      * Switch current mode.
      */
-    public async switchMode(cdp: CdpService, mode: string): Promise<AgCommandResult> {
+    public async switchMode(workspacePath: string, mode: string): Promise<AgCommandResult> {
         try {
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            if (!cdp) {
+                return { ok: false, status: 'error', summary: 'Workspace is not connected to CDP.' };
+            }
             this.modeService.setMode(mode);
             const res = await cdp.setUiMode(mode);
             if (res.ok) {
@@ -174,17 +163,26 @@ export class AgController {
      * Note: This exposes the PromptDispatcher via controller logic.
      */
     public async sendTask(
-        channel: TelegramChannel,
-        cdp: CdpService,
+        workspacePath: string,
         prompt: string,
         options: any = {}
     ): Promise<AgCommandResult> {
         try {
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            if (!cdp) {
+                return { ok: false, status: 'error', summary: 'Workspace is not connected to CDP.' };
+            }
+
+            const channel: TelegramChannel = {
+                chatId: options.chatId ? Number(options.chatId) : -1,
+                threadId: options.threadId ? Number(options.threadId) : undefined
+            };
+
             // Check if busy 
             if (this.promptDispatcher.isBusy(channel, cdp)) {
                 return {
                     ok: false,
-                    status: 'busy',
+                    status: 'running',
                     summary: 'Workspace is currently busy.'
                 };
             }
@@ -202,7 +200,7 @@ export class AgController {
                 ok: true,
                 status: 'running',
                 summary: 'Task sent to dispatcher.',
-                chatId: channel.chatId.toString()
+                chatId: String(channel.chatId)
             };
         } catch (e: any) {
             return {
@@ -217,14 +215,23 @@ export class AgController {
     /**
      * Get running status.
      */
-    public async getRunStatus(channel: TelegramChannel, cdp: CdpService): Promise<AgCommandResult> {
+    public async getRunStatus(workspacePath: string, options: any = {}): Promise<AgCommandResult> {
         try {
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            if (!cdp) {
+                return { ok: false, status: 'error', summary: 'Workspace is not connected to CDP.' };
+            }
+
+            const channel: TelegramChannel = {
+                chatId: options.chatId ? Number(options.chatId) : -1,
+                threadId: options.threadId ? Number(options.threadId) : undefined
+            };
+
             const isBusy = this.promptDispatcher.isBusy(channel, cdp);
             return {
                 ok: true,
-                status: 'success',
-                summary: 'Retrieved run status.',
-                data: { isBusy }
+                status: isBusy ? 'running' : 'idle',
+                summary: 'Retrieved run status.'
             };
         } catch (e: any) {
             return {
@@ -239,8 +246,13 @@ export class AgController {
     /**
      * Stop currently running task.
      */
-    public async stopRun(cdp: CdpService): Promise<AgCommandResult> {
+    public async stopRun(workspacePath: string): Promise<AgCommandResult> {
         try {
+            const cdp = this.bridge.pool.getConnected(workspacePath);
+            if (!cdp) {
+                return { ok: false, status: 'error', summary: 'Workspace is not connected to CDP.' };
+            }
+
             const contextId = cdp.getPrimaryContextId();
             const callParams: Record<string, unknown> = { expression: RESPONSE_SELECTORS.CLICK_STOP_BUTTON, returnByValue: true, awaitPromise: false };
             if (contextId !== null) callParams.contextId = contextId;

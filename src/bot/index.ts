@@ -1041,7 +1041,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         const cdp = resolved?.cdp ?? getCurrentCdp(bridge);
 
         if (modeName && cdp) {
-            const res = await agController.switchMode(cdp, modeName);
+            const wsName = cdp.getCurrentWorkspaceName();
+            const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+            const res = await agController.switchMode(workspacePath, modeName);
             await ctx.reply(res.ok ? `✅ ${res.summary}` : `⚠️ ${res.summary}`);
         } else {
             await sendModeUI(
@@ -1061,7 +1063,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (modelName) {
             const cdp = getCdp();
             if (!cdp) { await ctx.reply('Not connected to CDP. Send a message first to connect.'); return; }
-            const res = await agController.switchModel(cdp, modelName);
+            const wsName = cdp.getCurrentWorkspaceName();
+            const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+            const res = await agController.switchModel(workspacePath, modelName);
             if (res.ok) { await ctx.reply(`Model changed to <b>${escapeHtml(res.data?.model || modelName)}</b>.`, { parse_mode: 'HTML' }); }
             else { await ctx.reply(res.error || res.summary); }
         } else {
@@ -1215,7 +1219,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (!cdp) { await ctx.reply('⚠️ Not connected to CDP.'); return; }
 
         try {
-            const res = await agController.stopRun(cdp);
+            const wsName = cdp.getCurrentWorkspaceName();
+            const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+            const res = await agController.stopRun(workspacePath);
 
             if (res.ok) {
                 const ch = getChannel(ctx);
@@ -1263,36 +1269,32 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     bot.command('chat', async (ctx) => {
         const ch = getChannel(ctx);
         const key = channelKey(ch);
-        const res = await agController.getChatInfo(key);
+        const session = chatSessionRepo.findByChannelId(key);
 
-        if (res.ok && res.data) {
-            if (res.data.currentSession) {
-                const session = res.data.currentSession;
-                const allSessions = res.data.sessions;
-                const sessionList = allSessions.map((s: any) => {
-                    const name = s.displayName || `session-${s.sessionNumber}`;
-                    const current = s.channelId === key ? ' ← Current' : '';
-                    return `• ${name}${current}`;
-                }).join('\n');
+        if (session) {
+            const allSessions = chatSessionRepo.findByCategoryId(session.categoryId);
+            const sessionList = allSessions.map((s: any) => {
+                const name = s.displayName || `session-${s.sessionNumber}`;
+                const current = s.channelId === key ? ' ← Current' : '';
+                return `• ${name}${current}`;
+            }).join('\n');
 
-                await replyHtml(ctx,
-                    `<b>💬 Chat Session Info</b>\n\n` +
-                    `<b>Current:</b> #${session.sessionNumber} — ${escapeHtml(session.displayName || '(Unset)')}\n` +
-                    `<b>Project:</b> ${escapeHtml(session.workspacePath)}\n` +
-                    `<b>Total sessions:</b> ${res.data.totalSessions}\n\n` +
-                    `<b>Sessions:</b>\n${escapeHtml(sessionList)}`
-                );
-            } else {
-                const info = res.data;
-                await replyHtml(ctx,
-                    `<b>💬 Chat Session Info</b>\n\n` +
-                    `<b>Title:</b> ${escapeHtml(info.title)}\n` +
-                    `<b>Status:</b> ${info.hasActiveChat ? '🟢 Active' : '⚪ Inactive'}\n\n` +
-                    `<i>Use /project to bind a project first.</i>`
-                );
-            }
+            await replyHtml(ctx,
+                `<b>💬 Chat Session Info</b>\n\n` +
+                `<b>Current:</b> #${session.sessionNumber} — ${escapeHtml(session.displayName || '(Unset)')}\n` +
+                `<b>Total Sessions:</b> ${allSessions.length}\n\n` +
+                `<b>All Sessions:</b>\n${escapeHtml(sessionList)}`
+            );
         } else {
-            await ctx.reply(`⚠️ Failed to get chat info: ${res.error || res.summary}`);
+            const resolved = await resolveWorkspaceAndCdp(ch);
+            const wsName = resolved?.projectName || getCurrentCdp(bridge)?.getCurrentWorkspaceName();
+            if (!wsName) {
+                await ctx.reply('⚠️ No active project or chat session.');
+                return;
+            }
+            const workspacePath = workspaceService.getWorkspacePath(wsName);
+            const res = await agController.getChatInfo(workspacePath);
+            await ctx.reply(res.data?.hasActiveChat ? `Global Active Chat: ${res.data?.title}` : 'No global active chat');
         }
     });
 
@@ -1852,7 +1854,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (result.prompt) {
                 const cdp = getCurrentCdp(bridge);
                 if (cdp) {
-                    agController.sendTask(ch, cdp, result.prompt, {
+                    const wsName = cdp.getCurrentWorkspaceName();
+                    const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+                    agController.sendTask(workspacePath, result.prompt, {
+                        chatId: ch.chatId,
+                        threadId: ch.threadId,
                         dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
                     });
                 } else {
@@ -1872,8 +1878,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate: check if workspace is busy ────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
-        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
-        const busy = statusRes.data?.isBusy ?? false;
+        const workspacePath = workspaceService.getWorkspacePath(resolved.projectName);
+        const statusRes = await agController.getRunStatus(workspacePath, { chatId: ch.chatId, threadId: ch.threadId });
+        const busy = statusRes.status === 'running';
         const bypassed = busy ? consumeBypass(interruptKey) : false;
         logger.info(`[concurrencyGate] wsKey=${wsKey} busy=${busy} bypassed=${bypassed}`);
         if (busy && !bypassed) {
@@ -1930,13 +1937,11 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // Fire-and-forget: do NOT await so Grammy can process the next update immediately.
         // The lock is set synchronously inside send() before its first await,
         // so isBusy() will see it when the next message handler runs.
-        promptDispatcher.send({
-            channel: ch,
-            prompt: text,
-            cdp: resolved.cdp,
-            inboundImages: [],
-            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-        }).catch((e) => logger.error('[textMsg] dispatch failed:', e));
+        agController.sendTask(workspacePath, text, {
+            chatId: ch.chatId,
+            threadId: ch.threadId,
+            dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        });
     });
 
     // Photo message handler
@@ -1961,9 +1966,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
+        const workspacePath = workspaceService.getWorkspacePath(resolved.projectName);
         
-        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
-        const isBusy = statusRes.data?.isBusy ?? false;
+        const statusRes = await agController.getRunStatus(workspacePath, { chatId: ch.chatId, threadId: ch.threadId });
+        const isBusy = statusRes.status === 'running';
         
         if (isBusy && !consumeBypass(interruptKey)) {
             const position = addPendingInterrupt(interruptKey, {
@@ -1997,7 +2003,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── End concurrency gate ────────────────────────────────────────────
 
         // Fire-and-forget; cleanup images after dispatch completes (not immediately)
-        agController.sendTask(ch, resolved.cdp, caption, {
+        agController.sendTask(workspacePath, caption, {
+            chatId: ch.chatId,
+            threadId: ch.threadId,
             inboundImages,
             dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
         }).finally(() => cleanupInboundImageAttachments(inboundImages).catch(() => {}));
@@ -2045,13 +2053,13 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             if (result.prompt) {
                 const cdp = getCurrentCdp(bridge);
                 if (cdp) {
-                    promptDispatcher.send({
-                        channel: ch,
-                        prompt: result.prompt,
-                        cdp,
-                        inboundImages: [],
-                        options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
-                    }).catch((e) => logger.error('[voiceCmd] dispatch failed:', e));
+                    const wsName = cdp.getCurrentWorkspaceName();
+                    const workspacePath = wsName ? workspaceService.getWorkspacePath(wsName) : '';
+                    agController.sendTask(workspacePath, result.prompt, {
+                        chatId: ch.chatId,
+                        threadId: ch.threadId,
+                        dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+                    });
                 }
             }
             return;
@@ -2062,9 +2070,10 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         // ── Concurrency gate ────────────────────────────────────────────────
         const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
         const interruptKey = safeCallbackKey(wsKey);
+        const workspacePath = workspaceService.getWorkspacePath(resolved.projectName);
         
-        const statusRes = await agController.getRunStatus(ch, resolved.cdp);
-        const isBusy = statusRes.data?.isBusy ?? false;
+        const statusRes = await agController.getRunStatus(workspacePath, { chatId: ch.chatId, threadId: ch.threadId });
+        const isBusy = statusRes.status === 'running';
         
         if (isBusy && !consumeBypass(interruptKey)) {
             const position = addPendingInterrupt(interruptKey, {
@@ -2101,7 +2110,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         if (userMsgDetector) userMsgDetector.addEchoHash(transcript);
 
         // Fire-and-forget: same pattern as text handler
-        agController.sendTask(ch, resolved.cdp, transcript, {
+        agController.sendTask(workspacePath, transcript, {
+            chatId: ch.chatId,
+            threadId: ch.threadId,
             dispatchOptions: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
         });
     });

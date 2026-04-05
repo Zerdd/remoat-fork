@@ -70,36 +70,52 @@ describe('AgController', () => {
 
     test('switchModel should set UI model via cdp', async () => {
         const mockCdp = { setUiModel: jest.fn().mockResolvedValue({ ok: true, model: 'GPT-4' }) };
-        const result = await controller.switchModel(mockCdp as any, 'GPT-4');
+        mockBridge.pool.getConnected.mockReturnValueOnce(mockCdp);
+        const result = await controller.switchModel('/fake/ws', 'GPT-4');
 
         expect(result.ok).toBe(true);
         expect(mockCdp.setUiModel).toHaveBeenCalledWith('GPT-4');
         expect(result.data?.model).toBe('GPT-4');
     });
 
-    test('sendTask should return busy status when running', async () => {
+    test('sendTask should return running status when busy', async () => {
+        mockBridge.pool.getConnected.mockReturnValueOnce({});
         mockPromptDispatcher.isBusy.mockReturnValueOnce(true);
-        const result = await controller.sendTask({} as any, {} as any, 'Hello');
+        const result = await controller.sendTask('/fake/ws', 'Hello');
 
         expect(result.ok).toBe(false);
-        expect(result.status).toBe('busy');
+        expect(result.status).toBe('running');
         expect(mockPromptDispatcher.send).not.toHaveBeenCalled();
     });
 
     test('sendTask should return running status and dispatch if not busy', async () => {
+        mockBridge.pool.getConnected.mockReturnValueOnce({});
         mockPromptDispatcher.isBusy.mockReturnValueOnce(false);
-        const result = await controller.sendTask({ chatId: 123 } as any, {} as any, 'Hello');
+        const result = await controller.sendTask('/fake/ws', 'Hello', { chatId: 123 });
 
         expect(result.ok).toBe(true);
         expect(result.status).toBe('running');
         expect(mockPromptDispatcher.send).toHaveBeenCalled();
     });
 
-    test('getRunStatus should return isBusy state', async () => {
+    test('getRunStatus should return running state when busy', async () => {
+        mockBridge.pool.getConnected.mockReturnValueOnce({});
         mockPromptDispatcher.isBusy.mockReturnValueOnce(true);
-        const result = await controller.getRunStatus({} as any, {} as any);
+        const result = await controller.getRunStatus('/fake/ws');
 
         expect(result.ok).toBe(true);
-        expect(result.data?.isBusy).toBe(true);
+        expect(result.status).toBe('running');
+    });
+
+    test('stopRun should invoke CDP runtime injection', async () => {
+        const mockCdp = {
+            getPrimaryContextId: jest.fn().mockReturnValue(1),
+            call: jest.fn().mockResolvedValue({ result: { value: { ok: true } } })
+        };
+        mockBridge.pool.getConnected.mockReturnValueOnce(mockCdp);
+
+        const result = await controller.stopRun('/fake/ws');
+        expect(result.ok).toBe(true);
+        expect(mockCdp.call).toHaveBeenCalledWith('Runtime.evaluate', expect.any(Object));
     });
 });
