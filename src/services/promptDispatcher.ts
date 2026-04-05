@@ -8,6 +8,7 @@ import { TitleGeneratorService } from './titleGeneratorService';
 import { TelegramTopicManager } from './telegramTopicManager';
 import { ChatSessionService } from './chatSessionService';
 import { InboundImageAttachment } from '../utils/imageHandler';
+import { WorkspaceLock } from '../utils/workspaceLock';
 
 export interface PromptDispatchOptions {
     chatSessionService: ChatSessionService;
@@ -22,6 +23,7 @@ export interface PromptDispatchRequest {
     cdp: CdpService;
     inboundImages?: InboundImageAttachment[];
     options?: PromptDispatchOptions;
+    workspacePath?: string;
 }
 
 export interface PromptDispatcherDeps {
@@ -67,17 +69,33 @@ export class PromptDispatcher {
      * Check if a workspace is currently processing a prompt.
      * Returns true when a workspace lock is held (generation in progress).
      */
-    isBusy(ch: TelegramChannel, cdp: CdpService): boolean {
+    async isBusy(ch: TelegramChannel, cdp: CdpService, workspacePath?: string): Promise<boolean> {
         const lockKey = this.getWorkspaceKey(ch, cdp);
         const busy = this.workspaceLocks.has(lockKey);
+        
+        if (busy) return true;
+        if (workspacePath && await WorkspaceLock.isLocked(workspacePath)) {
+            return true;
+        }
+        
         logger.debug(`[PromptDispatcher] isBusy(${lockKey}) = ${busy} (locks: ${this.workspaceLocks.size})`);
-        return busy;
+        return false;
     }
 
     async send(req: PromptDispatchRequest): Promise<void> {
         const chKey = this.channelKey(req.channel);
         const wsName = req.cdp.getCurrentWorkspaceName();
         const wsKey = wsName ? `ws:${wsName}` : null;
+
+        if (req.workspacePath) {
+            try {
+                await WorkspaceLock.acquire(req.workspacePath);
+            } catch (e: any) {
+                logger.error('[PromptDispatcher] Failed to acquire cross-process lock', e);
+                // Return immediately or throw? The caller didn't await send, but the async task dies here.
+                return;
+            }
+        }
 
         // Serialize per workspace (primary) and per channel (fallback).
         // Two topics bound to the same workspace must not poll the DOM concurrently.
@@ -110,6 +128,9 @@ export class PromptDispatcher {
             }
             if (this.channelLocks.get(chKey) === current) {
                 this.channelLocks.delete(chKey);
+            }
+            if (req.workspacePath) {
+                await WorkspaceLock.release(req.workspacePath).catch(() => {});
             }
             this.deps.onTaskComplete?.(req.channel, lockKey);
         }

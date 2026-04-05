@@ -11,6 +11,7 @@ import { SlashCommandHandler } from '../commands/slashCommandHandler';
 import { CleanupCommandHandler, CLEANUP_ARCHIVE_BTN, CLEANUP_DELETE_BTN, CLEANUP_CANCEL_BTN } from '../commands/cleanupCommandHandler';
 
 import { AgController } from '../controller/agController';
+import { initAppServices } from '../bootstrap';
 import { ModeService, AVAILABLE_MODES, MODE_DISPLAY_NAMES, MODE_DESCRIPTIONS, MODE_UI_NAMES } from '../services/modeService';
 import { ModelService } from '../services/modelService';
 import { TemplateRepository } from '../database/templateRepository';
@@ -155,7 +156,7 @@ function createSerialTaskQueue(queueName: string, traceId: string): (task: () =>
     };
 }
 
-async function sendPromptToAntigravity(
+export async function sendPromptToAntigravity(
     bridge: CdpBridge,
     channel: TelegramChannel,
     prompt: string,
@@ -170,13 +171,14 @@ async function sendPromptToAntigravity(
         titleGenerator: TitleGeneratorService;
     }
 ): Promise<void> {
-    const api = bridge.botApi!;
+    const api = bridge.botApi;
     const monitorTraceId = channelKey(channel);
     const enqueueGeneral = createSerialTaskQueue('general', monitorTraceId);
     const enqueueResponse = createSerialTaskQueue('response', monitorTraceId);
     const enqueueActivity = createSerialTaskQueue('activity', monitorTraceId);
 
     const sendMsg = async (text: string): Promise<number | null> => {
+        if (!api) return null;
         try {
             const truncated = text.length > TELEGRAM_MSG_LIMIT ? text.slice(0, TELEGRAM_MSG_LIMIT - 20) + '\n...(truncated)' : text;
             const msg = await api.sendMessage(channel.chatId, truncated, {
@@ -191,6 +193,7 @@ async function sendPromptToAntigravity(
     };
 
     const editMsg = async (msgId: number, text: string, maxRetries = 3): Promise<void> => {
+        if (!api) return;
         const truncated = text.length > TELEGRAM_MSG_LIMIT ? text.slice(0, TELEGRAM_MSG_LIMIT - 20) + '\n...(truncated)' : text;
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
@@ -248,12 +251,12 @@ async function sendPromptToAntigravity(
             }
         }
 
-        if (hasFile) {
+        if (hasFile && api) {
             try {
                 const fileContent = stripHtmlForFile(formattedBody);
                 const buf = Buffer.from(fileContent, 'utf-8');
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                await api.sendDocument(channel.chatId, new InputFile(buf, `response-${timestamp}.md`), {
+                await api?.sendDocument(channel.chatId, new InputFile(buf, `response-${timestamp}.md`), {
                     caption: `📄 Full response (${rawBody.length} chars)`,
                     message_thread_id: channel.threadId,
                 });
@@ -278,8 +281,8 @@ async function sendPromptToAntigravity(
     let liveActivityMsgId: number | null = null;
     try {
         const sendingText = `<b>${PHASE_ICONS.sending} ${escapeHtml(modeName)} · ${escapeHtml(modelLabel)}</b>\n\n<i>Sending...</i>`;
-        const sendingMsg = await api.sendMessage(channel.chatId, sendingText, { parse_mode: 'HTML', message_thread_id: channel.threadId });
-        liveActivityMsgId = sendingMsg.message_id;
+        const sendingMsg = await api?.sendMessage(channel.chatId, sendingText, { parse_mode: 'HTML', message_thread_id: channel.threadId });
+        if (sendingMsg) liveActivityMsgId = sendingMsg.message_id;
     } catch (e) { logger.error('[sendPrompt] Failed to send initial status:', e); }
 
     let isFinalized = false;
@@ -425,13 +428,13 @@ async function sendPromptToAntigravity(
         if (!imageIntentPattern.test(prompt) && !responseText.includes('![') && !imageUrlPattern.test(responseText)) return;
 
         const extracted = await cdp.extractLatestResponseImages(MAX_OUTBOUND_GENERATED_IMAGES);
-        if (extracted.length === 0) return;
+        if (extracted.length === 0 || !api) return;
 
         for (let i = 0; i < extracted.length; i++) {
             const file = await toTelegramInputFile(extracted[i], i);
             if (file) {
                 try {
-                    await api.sendPhoto(channel.chatId, new InputFile(file.buffer, file.name), {
+                    await api?.sendPhoto(channel.chatId, new InputFile(file.buffer, file.name), {
                         caption: `🖼️ Generated image (${i + 1}/${extracted.length})`,
                         message_thread_id: channel.threadId,
                     });
@@ -622,7 +625,7 @@ async function sendPromptToAntigravity(
 
                         try {
                             const payload = await buildModelsUI(cdp, () => bridge.quota.fetchQuota());
-                            if (payload) {
+                            if (payload && api) {
                                 await api.sendMessage(channel.chatId, payload.text, { parse_mode: 'HTML', message_thread_id: channel.threadId, reply_markup: payload.keyboard });
                             }
                         } catch (e) { logger.error('[Quota] Failed to send model selection UI:', e); }
@@ -837,47 +840,20 @@ async function sendPromptToAntigravity(
 // =============================================================================
 
 export const startBot = async (cliLogLevel?: LogLevel) => {
-    const config = loadConfig();
-    logger.setLogLevel(cliLogLevel ?? config.logLevel);
-
-    const dbPath = process.env.NODE_ENV === 'test' ? ':memory:' : ConfigLoader.getDefaultDbPath();
-    const db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    const modeService = new ModeService();
-    const modelService = new ModelService();
-    const templateRepo = new TemplateRepository(db);
-    const workspaceBindingRepo = new WorkspaceBindingRepository(db);
-    const chatSessionRepo = new ChatSessionRepository(db);
-    const workspaceService = new WorkspaceService(config.workspaceBaseDir);
-
-    await ensureAntigravityRunning();
-
-    const bridge = initCdpBridge(config.autoApproveFileEdits);
-    bridge.botToken = config.telegramBotToken;
-
-    const chatSessionService = new ChatSessionService();
-    const titleGenerator = new TitleGeneratorService();
-    const promptDispatcher = new PromptDispatcher({
-        bridge,
-        modeService,
-        modelService,
-        sendPromptImpl: sendPromptToAntigravity,
-        onTaskComplete: (channel, wsKey) => {
-            // Auto-queue fallback: when a task finishes, auto-dispatch any
-            // pending interrupts the user hasn't acted on yet.
-            // Interrupt state uses safeCallbackKey-truncated keys, so match that here.
+    const services = await initAppServices(
+        cliLogLevel,
+        sendPromptToAntigravity,
+        (channel, wsKey) => {
             const interruptKey = safeCallbackKey(wsKey);
             if (!hasPendingInterrupts(interruptKey)) return;
 
             const queued = drainPendingInterrupts(interruptKey);
             logger.info(`[autoQueue] Task done for ${wsKey} — auto-dispatching ${queued.length} queued message(s)`);
 
-            // Extract project name from wsKey (format: "ws:{projectName}" or channel key)
             const projectName = wsKey.startsWith('ws:') ? wsKey.slice(3) : null;
 
             for (const pending of queued) {
-                // Re-resolve CDP from pool to avoid stale references
-                const freshCdp = projectName ? bridge.pool.getConnected(projectName) : null;
+                const freshCdp = projectName ? services.bridge.pool.getConnected(projectName) : null;
                 if (!freshCdp) {
                     logger.warn(`[autoQueue] Workspace ${wsKey} no longer connected, discarding queued message`);
                     if (pending.inboundImages?.length) {
@@ -886,9 +862,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     continue;
                 }
 
-                // Edit the interrupt keyboard message to show it was auto-queued
-                if (pending.interruptMsgId && bridge.botApi) {
-                    bridge.botApi.editMessageText(
+                if (pending.interruptMsgId && services.bridge.botApi) {
+                    services.bridge.botApi.editMessageText(
                         pending.channel.chatId,
                         pending.interruptMsgId,
                         '📥 Task finished — sending your queued message…',
@@ -896,8 +871,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     ).catch((e: any) => { logger.debug('[autoQueue] editMessage failed:', e); });
                 }
                 if (projectName) {
-                    const workspacePath = workspaceService.getWorkspacePath(projectName);
-                    agController.sendTask(workspacePath, pending.prompt, {
+                    const workspacePath = services.workspaceService.getWorkspacePath(projectName);
+                    services.agController.sendTask(workspacePath, pending.prompt, {
                         chatId: pending.channel.chatId,
                         threadId: pending.channel.threadId,
                         inboundImages: pending.inboundImages,
@@ -905,10 +880,24 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
                 }
             }
-        },
-    });
+        }
+    );
 
-    const agController = new AgController(bridge, modeService, modelService, chatSessionService, promptDispatcher, chatSessionRepo);
+    const {
+        config,
+        db,
+        modeService,
+        modelService,
+        templateRepo,
+        workspaceBindingRepo,
+        chatSessionRepo,
+        workspaceService,
+        bridge,
+        chatSessionService,
+        titleGenerator,
+        promptDispatcher,
+        agController
+    } = services;
 
     const slashCommandHandler = new SlashCommandHandler(templateRepo);
     const cleanupHandler = new CleanupCommandHandler(chatSessionRepo, workspaceBindingRepo);

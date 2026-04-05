@@ -7,6 +7,7 @@ import { startAction } from './commands/start';
 import { doctorAction } from './commands/doctor';
 import { setupAction } from './commands/setup';
 import { openAction } from './commands/open';
+import { apiAction } from './commands/api';
 import { ConfigLoader } from '../utils/configLoader';
 import { printWelcome } from './welcome';
 
@@ -49,5 +50,10 @@ program
     .command('open')
     .description('Open Antigravity with CDP enabled (auto-selects available port)')
     .action(openAction);
+
+program
+    .command('api')
+    .description('Start the local HTTP API for AgController')
+    .action((_opts, cmd) => apiAction(cmd.parent.opts(), cmd.parent));
 
 program.parse();

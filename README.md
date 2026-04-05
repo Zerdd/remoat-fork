@@ -166,6 +166,29 @@ npm run dev       # development mode with auto-reload
 npm start         # run from source
 ```
 
+### Local HTTP API (Developer Use)
+
+If you need your external tools or an MCP server to drive Antigravity programmatically, you can run the local HTTP API layer:
+
+```bash
+npm run api       # start from source via package.json
+# or
+remoat api        # if installed globally
+```
+
+> **Note:** This API binds strictly to `127.0.0.1:3100` and has no authentication. It is intended strictly for local-machine programmatic consumption only.
+
+**Example `curl` call:**
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/send-task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspacePath": "/path/to/your/workspace",
+    "prompt": "Create a simple hello world HTML file"
+  }'
+```
+
 ### Launching Antigravity with CDP
 
 Remoat connects to Antigravity via Chrome DevTools Protocol. Launch Antigravity with a debug port enabled:
@@ -203,6 +226,7 @@ remoat              auto-detect: runs setup if unconfigured, otherwise starts th
 remoat setup        interactive setup wizard
 remoat open         launch Antigravity with CDP port enabled
 remoat start        start the Telegram bot
+remoat api          start the local HTTP API for AgController
 remoat doctor       diagnose configuration and connectivity issues
 remoat --verbose    show debug-level logs (CDP traffic, detector events)
 remoat --quiet      errors only

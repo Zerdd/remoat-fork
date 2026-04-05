@@ -179,7 +179,7 @@ export class AgController {
             };
 
             // Check if busy 
-            if (this.promptDispatcher.isBusy(channel, cdp)) {
+            if (await this.promptDispatcher.isBusy(channel, cdp, workspacePath)) {
                 return {
                     ok: false,
                     status: 'running',
@@ -193,7 +193,8 @@ export class AgController {
                 prompt,
                 cdp,
                 inboundImages: options.inboundImages || [],
-                options: options.dispatchOptions || {}
+                options: options.dispatchOptions || {},
+                workspacePath
             }).catch((e) => logger.error('[AgController.sendTask] dispatch failed:', e));
 
             return {
@@ -227,7 +228,7 @@ export class AgController {
                 threadId: options.threadId ? Number(options.threadId) : undefined
             };
 
-            const isBusy = this.promptDispatcher.isBusy(channel, cdp);
+            const isBusy = await this.promptDispatcher.isBusy(channel, cdp, workspacePath);
             return {
                 ok: true,
                 status: isBusy ? 'running' : 'idle',
